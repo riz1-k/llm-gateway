@@ -31,7 +31,7 @@ jobs:
           --health-cmd "pg_isready -U dev -d llmgateway_test"
           --health-interval 5s --health-timeout 3s --health-retries 20
       redis:
-        image: redis:8.8.4-alpine@sha256:be8dfdf58574d626e0abe03073ce9178509e0e9564a316e34e71d2289b8370e1
+        image: redis:8.10.0-alpine@sha256:978f0e01593e65eed801f2402944efcd936d43b5027e4908a7897baf88ed6241
         ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping"
