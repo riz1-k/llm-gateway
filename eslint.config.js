@@ -44,5 +44,9 @@ export default tseslint.config(
   // k6 scripts run in k6's JS runtime, which injects __ENV
   { files: ['bench/k6/**'], languageOptions: { globals: { __ENV: 'readonly' } } },
   { files: ['**/*.js', '**/*.mjs'], ...tseslint.configs.disableTypeChecked },
+  // examples/* are standalone npm projects with their own node_modules (installed by
+  // examples/run-all.sh), so they are linted without type information.
+  { files: ['examples/**/*.ts'], ...tseslint.configs.disableTypeChecked },
+  { files: ['examples/**'], rules: { 'no-console': 'off' } },
   prettier,
 );

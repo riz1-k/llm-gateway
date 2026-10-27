@@ -1,0 +1,5 @@
+# installed per example by run-all.sh (kept out of the root pnpm workspace)
+node_modules/
+.venv/
+# gateway tarball packed from this checkout for library-hono
+.pack/

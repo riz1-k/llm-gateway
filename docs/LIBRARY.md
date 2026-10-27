@@ -12,6 +12,13 @@ npm i switchyard-gateway @hono/node-server   # @hono/node-server only if you ser
 
 The package is ESM-only and requires Node.js 22.12 or later. Types are included.
 
+Bun 1.3 and Deno 2.9 also run it (verified 2026-10-28; see
+[Runtime support](../README.md#runtime-support)). On Bun, serve `gateway.fetch` with `Bun.serve`
+rather than `@hono/node-server` or `startServer`: Bun's `node:http` does not report a client that
+disconnects before the first byte, so the gateway cannot cancel the upstream call. A runnable app
+that mounts the gateway and picks the right server per runtime is in
+[examples/library-hono](../examples/library-hono/).
+
 ## Serve it
 
 The shortest path does exactly what `switchyard serve` does. It loads the config, builds the

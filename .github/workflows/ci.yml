@@ -80,6 +80,61 @@ jobs:
           (cd packages/gateway && pnpm pack --pack-destination "$RUNNER_TEMP/pkg")
           scripts/pack-smoke.sh "$RUNNER_TEMP"/pkg/switchyard-gateway-*.tgz
 
+  examples:
+    # Every SDK example (examples/) against the mock provider, with the gateway running on each runtime.
+    name: Examples (${{ matrix.runtime }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [node, bun, deno]
+    services:
+      # Same digests as the node job (deploy/docker/docker-compose.yml).
+      postgres:
+        image: postgres:18.6-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
+        env:
+          POSTGRES_USER: dev
+          POSTGRES_PASSWORD: dev
+          POSTGRES_DB: llmgateway_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U dev -d llmgateway_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:8.10.0-alpine@sha256:978f0e01593e65eed801f2402944efcd936d43b5027e4908a7897baf88ed6241
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      EXAMPLES_REDIS_URL: redis://127.0.0.1:6379/1
+      EXAMPLES_DATABASE_URL: postgres://dev:dev@127.0.0.1:5432/llmgateway_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0 (version from packageManager)
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2 (Python examples)
+      - if: matrix.runtime == 'bun'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+      - if: matrix.runtime == 'deno'
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.9.8
+      - name: redis-cli for --platform
+        run: sudo apt-get install -y --no-install-recommends redis-tools
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Run all examples (platform on)
+        run: examples/run-all.sh --platform --runtime "${{ matrix.runtime }}"
+
   security:
     name: Dependency audit, secret scan
     runs-on: ubuntu-24.04

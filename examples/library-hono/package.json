@@ -1,0 +1,17 @@
+{
+  "name": "switchyard-example-library-hono",
+  "private": true,
+  "type": "module",
+  "description": "Switchyard embedded as a library in a Hono app",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node server.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.5",
+    "hono": "4.13.14",
+    "switchyard-gateway": "file:../.pack/switchyard-gateway-0.1.0.tgz"
+  }
+}
