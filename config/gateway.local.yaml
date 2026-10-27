@@ -37,7 +37,15 @@ auth:
       team: opsagent
       name: opsagent-dev
       allowed_routes:
-        [opsagent-chat, opsagent-judge, mock-chat, mock-embed, mock-rerank, mock-tools]
+        [
+          opsagent-chat,
+          opsagent-judge,
+          opsagent-scripted,
+          mock-chat,
+          mock-embed,
+          mock-rerank,
+          mock-tools,
+        ]
     - key: ${EVALS_GATEWAY_KEY:-sk-sy-dev-evals}
       team: evals
       name: evals-dev # all routes
@@ -109,6 +117,12 @@ models:
     base_url: http://127.0.0.1:8083/v1
     model: jina-reranker-v1-tiny-en.f16
     kind: rerank
+  # OpsAgent's deterministic stand-in model (`opsagent scripted-llm --port 8300`), for demos and dogfooding traffic.
+  opsagent-scripted-llm:
+    provider: local
+    base_url: http://127.0.0.1:8300/v1
+    model: opsagent-scripted
+    timeout_ms: 30000
   mock-extractive: { provider: mock, model: mock-extractive }
   mock-scripted: { provider: mock, model: mock-tools }
   mock-echo: { provider: mock, model: mock-echo }
@@ -166,6 +180,11 @@ routes:
     retry: { attempts: 2, backoff_ms: 500, max_backoff_ms: 4000 }
     timeout_ms: 240000
     cache: { exact: { ttl_s: 604800 } }
+  opsagent-scripted:
+    description: OpsAgent scripted model (start `opsagent scripted-llm` on :8300 first; no LLM, $0)
+    targets: [opsagent-scripted-llm]
+    retry: { attempts: 1 }
+    hidden: true # dev helper, not part of the client contract (PLAN §3.2)
   mock-chat:
     {
       description: 'Deterministic RAG-aware mock (citations / NO_ANSWER)',
