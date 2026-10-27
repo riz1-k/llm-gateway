@@ -17,3 +17,5 @@ deploy/helm/switchyard/files
 packages/gateway/config.schema.json
 # raw k6 output written by bench/run.sh
 bench/results
+# npm lockfiles of the standalone examples (written by npm)
+examples/*/package-lock.json

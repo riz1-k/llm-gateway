@@ -26,7 +26,7 @@ npx switchyard-gateway init && npx switchyard-gateway serve   # offline demo, no
 - **Drop-in OpenAI API:** `/v1/chat/completions` (streaming, tools, `response_format`,
   `stream_options.include_usage`), `/v1/embeddings`, `/v1/rerank` (Cohere/Jina shape) and
   `/v1/models`, with OpenAI-style errors. Verified with the official `openai` SDKs for Node and
-  Python.
+  Python, the Vercel AI SDK and LangChain ([examples](examples/)).
 - **Providers:**
   - OpenAI and Anthropic, natively (the Messages API is translated, including streaming tool use);
   - any OpenAI-compatible server (llama.cpp, vLLM, Ollama, Groq, OpenRouter, …);
@@ -130,6 +130,35 @@ serve({ fetch: gateway.fetch, port: 8787 }); // or app.route('/llm', gateway.app
 
 Custom providers, replaceable services (keys, limits, cache, usage sink) and in-process testing
 with the OpenAI SDK are covered in [docs/LIBRARY.md](docs/LIBRARY.md).
+
+## Examples
+
+Runnable clients in [`examples/`](examples/), each checked against the bundled mock provider by
+`examples/run-all.sh` (no API keys; `--platform` adds Redis and Postgres for the 402/429 checks,
+`--runtime bun|deno` switches runtimes):
+
+| Example                                        | Client                                            | Shows                                                                                                    |
+| ---------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| [openai-node](examples/openai-node/)           | `openai` 7.45.1                                   | chat, streamed `usage.cost`, embeddings with `input_type`, tools, `json_schema`, `x-sy-*` headers        |
+| [openai-python](examples/openai-python/)       | `openai` 3.40.0                                   | chat, streamed cost, embeddings with `input_type`, tools, `with_raw_response` headers                    |
+| [vercel-ai-sdk](examples/vercel-ai-sdk/)       | `ai` 7.0.154 + `@ai-sdk/openai-compatible` 3.0.79 | `generateText`, `streamText`, a tool call, `embedMany`, cost via `metadataExtractor`                     |
+| [langchain-python](examples/langchain-python/) | `langchain-openai` 1.7.3                          | `ChatOpenAI(base_url=…)` with `bind_tools`, streaming usage, headers, embeddings                         |
+| [langchain-js](examples/langchain-js/)         | `@langchain/openai` 1.7.1                         | `configuration.baseURL`, `bindTools`, `withStructuredOutput`                                             |
+| [curl](examples/curl/)                         | curl + jq                                         | rerank, `x-sy-cache: bypass \| refresh`, `x-sy-user` / `x-sy-tags`, error envelope (401/404/400/402/429) |
+| [library-hono](examples/library-hono/)         | `switchyard-gateway` + Hono                       | `createGateway` mounted under `/llm` in an app, a custom `UsageSink`, Node / Bun / Deno                  |
+
+## Runtime support
+
+Node.js is the supported runtime. Bun and Deno run the CLI and the library through their Node
+compatibility layers; each row was verified with `examples/run-all.sh` (all seven examples,
+platform off and `--platform`) plus a probe of `init`, `validate-config`, `serve` with Redis and
+Postgres, `worker`, `/metrics`, SIGHUP reload and SIGTERM shutdown.
+
+| Runtime        | Status    | Verified                                                                                         | Notes                                                                                                                                                                                                                                                                                                          |
+| -------------- | --------- | ------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Node.js 22, 24 | Supported | CI matrix (tests on 24, tarball smoke on 22 and 24); examples on 22.23.4 and 24.20.0, 2026-10-28 | `engines: >=22.12`. The TypeScript examples need 22.18+ (type stripping)                                                                                                                                                                                                                                       |
+| Bun 1.3.14     | Works     | 2026-10-28, local                                                                                | One gap: under `switchyard serve` / `startServer` (`@hono/node-server` on Bun's `node:http`), a client that disconnects before the first byte is not detected, so the upstream call runs to completion and is recorded as a 200 with its cost. Embedding with `Bun.serve({ fetch: gateway.fetch })` detects it |
+| Deno 2.9.8     | Works     | 2026-10-28, local (`deno run -A`, packages from `node_modules`)                                  | `Deno.serve` prints a one-time notice about its legacy `request.signal` behaviour; it does not affect responses. `npm:switchyard-gateway` is untested until the package is published                                                                                                                           |
 
 ## How it works
 

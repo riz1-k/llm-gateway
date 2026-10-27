@@ -1,0 +1,17 @@
+{
+  "name": "switchyard-example-vercel-ai-sdk",
+  "private": true,
+  "type": "module",
+  "description": "Switchyard with the Vercel AI SDK (@ai-sdk/openai-compatible)",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node index.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "3.0.79",
+    "ai": "7.0.154",
+    "zod": "4.6.7"
+  }
+}

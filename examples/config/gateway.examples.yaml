@@ -1,0 +1,70 @@
+# yaml-language-server: $schema=../../packages/gateway/config.schema.json
+#
+# Mock-only gateway config used by examples/run-all.sh. No real provider, no API key.
+#
+# - `mock-http` is the standalone mock provider (`switchyard mock-provider`) reached over HTTP as
+#   an `openai-compatible` upstream, so the examples go through the real HTTP adapter.
+# - `inproc` is the built-in in-process mock. Its `fixed_text` is a JSON document, used by the
+#   `structured` route to show `response_format: json_schema` (the mock does not enforce schemas).
+#
+# Platform off by default (in-memory keys, LRU cache, no limits or budgets). With
+# `run-all.sh --platform`, EXAMPLES_REDIS_URL and EXAMPLES_DATABASE_URL turn on Redis and
+# Postgres (rate limits, budgets, database keys, admin API) for the 402/429 checks.
+
+server:
+  port: ${PORT:-8787}
+  host: 127.0.0.1
+
+auth:
+  admin_token: ${SWITCHYARD_ADMIN_TOKEN:-}
+  static_keys:
+    - key: ${SWITCHYARD_API_KEY:-sk-sy-examples-local}
+      team: examples
+      name: examples
+
+redis: { url: '${EXAMPLES_REDIS_URL:-}', key_prefix: '${EXAMPLES_REDIS_PREFIX:-sy:examples:}' }
+database: { url: '${EXAMPLES_DATABASE_URL:-}' }
+usage: { stream: '${EXAMPLES_REDIS_PREFIX:-sy:examples:}usage', in_process_writer: false }
+
+providers:
+  mock-http:
+    type: openai-compatible
+    base_url: ${MOCK_URL:-http://127.0.0.1:8790}/v1
+    timeout_ms: 10000
+  inproc:
+    type: mock
+    fixed_text: '{"city":"Paris","country":"France","population_millions":2.1}'
+
+models:
+  echo: { provider: mock-http, model: mock-echo, pricing: { input: 0.15, output: 0.6 } }
+  tool-caller: { provider: mock-http, model: mock-tools, pricing: { input: 0.15, output: 0.6 } }
+  embedder:
+    provider: mock-http
+    model: mock-embed
+    kind: embedding
+    pricing: { input: 0.02 }
+    input_templates: { query: 'query: {text}', document: 'passage: {text}' }
+  reranker: { provider: mock-http, model: mock-rerank, kind: rerank }
+  json-fixed: { provider: inproc, model: mock-fixed, pricing: { input: 0.15, output: 0.6 } }
+
+routes:
+  chat:
+    description: Echoes the last user message (mock)
+    targets: [echo]
+    cache: { exact: { ttl_s: 3600 } }
+  tools:
+    description: Calls the first tool with schema-synthesized arguments, then summarizes the results (mock)
+    targets: [tool-caller]
+  structured:
+    description: Always answers with the same JSON document (mock)
+    targets: [json-fixed]
+  embed:
+    description: Deterministic hashed embeddings, 256-d (mock)
+    targets: [embedder]
+    cache: { exact: { ttl_s: 86400 } }
+  rerank:
+    description: Deterministic lexical rerank (mock)
+    targets: [reranker]
+
+# run-all.sh sets LOG_LEVEL=debug so usage events (with x-sy-user / x-sy-tags) appear in the log.
+observability: { log_level: '${LOG_LEVEL:-info}' }

@@ -445,7 +445,13 @@ heavy-docker lock and torn down afterwards.
   sequential Redis round trips per request. The next steps (one combined limit-and-budget Lua
   call, non-blocking post-response writes) change semantics and were left for a later release.
 - **Not published yet:** npm, GitHub Packages and GHCR wait for the owner's one-time setup
-  (RELEASING.md). Bun and Deno are untested.
+  (RELEASING.md).
+- **Bun: client disconnects are not detected under `switchyard serve`** (Bun 1.3.14). Bun's
+  `node:http` emits no `close` / `aborted` event when a client hangs up before the response
+  starts, so `@hono/node-server` never aborts the request signal: the upstream call runs to
+  completion and is recorded as a 200 with its cost. Node and Deno record a 499
+  `request_aborted`. Embedding with `Bun.serve({ fetch: gateway.fetch })` detects it. Otherwise
+  Bun 1.3.14 and Deno 2.9.8 pass every example and probe ([Wave 7 R9](#wave-7-r9--examples--runtimes)).
 - **Infra gaps (wave K):** see [Infrastructure → known gaps](#infra-known-gaps).
 - **Redis Cluster is not supported:** the Lua scripts touch multiple keys without hash tags. Use a
   single primary, with replicas or Sentinel.
@@ -952,3 +958,103 @@ passed!", mypy "no issues found in 89 source files", **422 passed, 3 skipped**; 
 `devenv/bin/leakscan.sh` clean on all three (356 / 429 / 482 files + history).
 
 **Left running:** nothing (servers killed by port, observe-host down, locks released).
+
+## Wave 7 R9 — examples + runtimes
+
+Runnable SDK examples, one command to check them all, and a verified runtime matrix. Branch
+`feat/examples` (worktree `llm-gateway-examples`). No gateway code changed.
+
+### Examples (`examples/`)
+
+| Example            | Pinned versions                                                    | Covers                                                                                                                                                            |
+| ------------------ | ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `openai-node`      | `openai` 7.45.1                                                    | chat + `usage.cost`, stream with the final cost chunk, embeddings + `input_type`, tool round trip, `json_schema`, `withResponse()` headers, `AuthenticationError` |
+| `openai-python`    | `openai` 3.40.0 (PEP 723, `uv run --script`)                       | the same core; headers via `with_raw_response`, `input_type` via `extra_body`                                                                                     |
+| `vercel-ai-sdk`    | `ai` 7.0.154, `@ai-sdk/openai-compatible` 3.0.79, `zod` 4.6.7      | `generateText` (+ response headers), `streamText`, a two-step tool call, `embedMany`, cost via a `metadataExtractor`                                              |
+| `langchain-python` | `langchain-openai` 1.7.3, `langchain-core` 1.7.0 (OpsAgent's pins) | `ChatOpenAI(base_url)`, `include_response_headers`, `stream_usage`, `bind_tools` round trip, `OpenAIEmbeddings`                                                   |
+| `langchain-js`     | `@langchain/openai` 1.7.1, `@langchain/core` 1.3.0, `zod` 4.6.7    | `configuration.baseURL`, `bindTools` round trip, `withStructuredOutput` (`jsonSchema`)                                                                            |
+| `curl`             | curl + jq                                                          | rerank, `x-sy-cache` default/bypass/refresh, `x-sy-user` / `x-sy-tags`, 401/404/400, and with the platform 402 + 429                                              |
+| `library-hono`     | `hono` 4.13.14, `@hono/node-server` 2.1.5, the packed gateway      | `createGateway` mounted under `/llm`, a custom `UsageSink` (cost per `x-sy-user`), Node / `Bun.serve` / `Deno.serve`                                              |
+
+- Versions are the current releases on 2026-10-28 (npm / PyPI). The JS examples commit a
+  `package-lock.json` and install with `npm ci` into their own folder; nothing was added to the
+  root pnpm lockfile. `library-hono` installs `switchyard-gateway` from a `pnpm pack` tarball of the
+  checkout (`examples/.pack`, gitignored) and has no lockfile (`.npmrc`), because the tarball's
+  integrity changes with every build.
+- `examples/config/gateway.examples.yaml` is mock-only: the standalone mock provider as an
+  `openai-compatible` upstream (so the real HTTP adapter is exercised), plus an in-process mock
+  with a JSON `fixed_text` for the `structured` route. The mock does not enforce JSON schemas;
+  the examples show the request shape and parsing.
+- The TypeScript examples run as plain `.ts` (Node type stripping, Node ≥ 22.18; Bun and Deno
+  natively). They type-check with the root `tsc` 6.0.3 in strict mode (ad hoc tsconfig, exit 0).
+  ESLint lints `examples/**/*.ts` without type information (`eslint.config.js`), and
+  `.prettierignore` skips the example lockfiles. The Python examples pass `ruff check` and
+  `ruff format`; both shell scripts pass shellcheck.
+
+### `examples/run-all.sh`
+
+Installs the example dependencies, packs the gateway, starts `switchyard mock-provider` and
+`switchyard serve` on free ports in 18700–18799, runs every example, checks each success line and
+that the attribution headers reached the usage events (gateway log, or the Redis stream with
+`--platform`), checks that the gateway logged no error, then kills what it started (by PID) and
+exits non-zero on any failure (checked with `--only curl,bogus` → exit 1). Options:
+`--platform` (Redis db 1 with a random key prefix that is deleted afterwards, Postgres
+`llmgateway_test` with the migrations applied to `public`; the curl example creates and
+soft-deletes two throwaway teams), `--runtime node|bun|deno`, `--only a,b`. About 9 s for all
+seven examples once the dependencies are installed.
+
+Results (2026-10-28, all exit 0, every example PASS, attribution PASS):
+
+| Runtime (gateway, mock, TS examples) | Platform off | `--platform` (402 + 429 included) |
+| ------------------------------------ | ------------ | --------------------------------- |
+| Node 24.20.0                         | 7/7          | 7/7                               |
+| Node 22.23.4 (checksum-verified)     | –            | 7/7                               |
+| Bun 1.3.14                           | 7/7          | 7/7                               |
+| Deno 2.9.8                           | 7/7          | 7/7                               |
+
+### Runtime probe (beyond the examples)
+
+For each of Node 24.20.0, Bun 1.3.14 and Deno 2.9.8 (`deno run -A` on `dist/cli.js`, packages
+from `node_modules`; Deno installed into `~/.local/bin` from the v2.9.8 release zip, SHA-256
+verified):
+
+- `switchyard --version` (0.1.0), `init`, `validate-config`: identical output.
+- `serve` with Redis and Postgres: `/readyz` reports both OK; three streamed requests return 200;
+  `/metrics` serves `sy_requests_total`; SIGHUP logs "config reloaded"; SIGTERM logs "shutdown
+  complete" and exits 0 within 30 ms.
+- `switchyard worker` on the same runtime: 3 events read and 3 inserted into `usage_events`;
+  exits 0 on SIGTERM.
+- An oversized body (12 MB) gets 413 on all three.
+- The installed tarball's CLI (`node_modules/switchyard-gateway/dist/cli.js`) runs on Bun and Deno,
+  and `library-hono` also works with `USE_NODE_SERVER=1` (`@hono/node-server`) on both.
+- **Client disconnect before the first byte** (mock latency 1.5 s, `curl --max-time 0.5`):
+
+  | Server                        | Node | Bun                | Deno |
+  | ----------------------------- | ---- | ------------------ | ---- |
+  | `switchyard serve` (CLI)      | 499  | **200** (not seen) | 499  |
+  | `@hono/node-server` + library | 499  | **200** (not seen) | 499  |
+  | `Bun.serve` / `Deno.serve`    | –    | 499                | 499  |
+
+  A minimal `node:http` server reproduces it without the gateway: on Bun the request's `close`
+  event fires only after the response is written (`aborted=false`), on Node and Deno immediately
+  (`aborted=true`). Fixing it in the gateway would mean a Bun-specific server path in
+  `startServer` (draining, shutdown, metrics port), which is not a tiny change, so it is
+  documented instead (README "Runtime support", LIBRARY.md, Known gaps).
+
+- Deno's `Deno.serve` prints a one-time notice about its legacy `request.signal` behaviour (the
+  signal also aborts after a successful response). Streams and usage are unaffected (full stream,
+  `[DONE]`, usage 200 in the probe).
+
+### Not covered
+
+- `deno run npm:switchyard-gateway` and `bunx switchyard-gateway` from the registry: the package is
+  not published yet. The tarball install covers the same files.
+- LlamaIndex and LiteLLM-as-client were skipped: both reach the gateway through the same
+  OpenAI-compatible clients shown above.
+- The gateway's own test suite was not run under Bun or Deno (vitest on Node only).
+
+### Docs
+
+README: "Examples" section (table) and "Runtime support" table after "As a library"; the feature
+bullet links the examples. LIBRARY.md: Bun/Deno note with the `Bun.serve` advice.
+`examples/README.md` plus one README per example, with real expected output.
