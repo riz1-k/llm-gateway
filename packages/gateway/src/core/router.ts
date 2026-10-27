@@ -1,6 +1,7 @@
 import type { BreakerConfig } from '../config/schema.js';
 import type { ResolvedConfig, ResolvedModel, ResolvedRoute } from '../config/resolve.js';
 import type { Logger } from '../observability/logger.js';
+import { noopMetrics, type GatewayMetrics } from '../observability/metrics.js';
 import type { AttemptContext, ProviderAdapter } from '../providers/base.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import type { BreakerStore, Outcome } from '../resilience/circuit-breaker.js';
@@ -60,6 +61,7 @@ export interface RouterDeps {
   strategies: StrategyRegistry;
   random?: Random;
   clock?: () => number;
+  metrics?: GatewayMetrics;
 }
 
 type Capability = OperationKind;
@@ -85,6 +87,7 @@ const supports = (adapter: ProviderAdapter, cap: Capability): boolean =>
 export class Router {
   private readonly clock: () => number;
   private readonly random: Random;
+  private readonly metrics: GatewayMetrics;
 
   constructor(
     private readonly config: ResolvedConfig,
@@ -93,6 +96,7 @@ export class Router {
   ) {
     this.clock = deps.clock ?? Date.now;
     this.random = deps.random ?? Math.random;
+    this.metrics = deps.metrics ?? noopMetrics;
   }
 
   private get breakerCfg(): BreakerConfig {
@@ -254,12 +258,15 @@ export class Router {
           }
         };
 
+        let upstreamStarted: number | undefined;
         try {
           const sem = this.deps.concurrency.get(model.providerName, model.provider.max_concurrency);
           release = await sem.acquire(
             Math.min(model.provider.queue_timeout_ms, Math.max(1, dctx.deadline - started)),
             scope.signal,
           );
+          upstreamStarted = this.clock();
+          this.metrics.queueWait(model.providerName, (upstreamStarted - started) / 1000);
           const value = await attemptFn(adapter, model, {
             requestId: dctx.requestId,
             signal: scope.signal,
@@ -276,9 +283,23 @@ export class Router {
             outcome: 'ok',
             latencyMs: this.clock() - started,
           });
+          this.metrics.upstreamAttempt(
+            model.providerName,
+            model.upstreamModel,
+            (this.clock() - upstreamStarted) / 1000,
+            true,
+          );
           return { value, model, finish };
         } catch (raw) {
           const err = this.normalize(raw, model, scope.timedOut());
+          if (upstreamStarted !== undefined && err.code !== 'aborted') {
+            this.metrics.upstreamAttempt(
+              model.providerName,
+              model.upstreamModel,
+              (this.clock() - upstreamStarted) / 1000,
+              false,
+            );
+          }
           finish(
             err.countsAsFailure
               ? 'failure'

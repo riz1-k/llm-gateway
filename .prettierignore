@@ -4,3 +4,4 @@ coverage
 pnpm-lock.yaml
 docs/SPEC.md
 packages/gateway/test/fixtures/**/*.sse
+packages/gateway/drizzle/meta

@@ -3,13 +3,17 @@ import { directRoute } from '../config/resolve.js';
 import type { Logger } from '../observability/logger.js';
 import type { CacheMode } from '../cache/keys.js';
 import {
+  cacheScope,
   chatCacheKey,
   embeddingCacheKey,
+  embeddingItemCacheKey,
   isChatCacheable,
   isRouteCacheable,
   rerankCacheKey,
 } from '../cache/keys.js';
-import { estimatePromptTokens, estimateTextTokens } from '../limits/estimate.js';
+import { semanticQuery } from '../cache/semantic.js';
+import { countTokens, estimatePromptTokens, estimateTextTokens } from '../limits/estimate.js';
+import { noopMetrics, type GatewayMetrics } from '../observability/metrics.js';
 import { computeCost, estimateCost, formatUsd } from '../usage/pricing.js';
 import { encodeSSE, SSE_DONE } from '../util/sse.js';
 import { ChunkAccumulator, isMeaningfulChunk, responseToChunks } from './chunks.js';
@@ -19,6 +23,7 @@ import { countFallbacks, type AttemptRecord, type DispatchContext, type Router }
 import type {
   ApiKeyRecord,
   CachedPayload,
+  CacheEntry,
   GatewayServices,
   RateLimitDecision,
   UsageEvent,
@@ -28,6 +33,7 @@ import type {
   ChatChunk,
   ChatRequest,
   ChatResponse,
+  EmbeddingData,
   EmbeddingRequest,
   EmbeddingResponse,
   ModelCard,
@@ -74,6 +80,7 @@ export interface PipelineDeps {
   config: ResolvedConfig;
   router: Router;
   services: GatewayServices;
+  metrics?: GatewayMetrics;
   clock?: () => number;
 }
 
@@ -96,6 +103,15 @@ interface Outcome {
   attempts: AttemptRecord[];
   /** Provider/model that produced a cached response (cache hits). */
   cachedFrom?: { provider: string; model: string };
+  /** Extra response headers (e.g. per-item cache stats). */
+  extraHeaders?: Record<string, string>;
+}
+
+/** State of a semantic-cache lookup that missed, used to index the response afterwards. */
+interface SemanticPending {
+  index: string;
+  vector: number[];
+  ttl: number;
 }
 
 const DEFAULT_COMPLETION_ESTIMATE = 1024;
@@ -106,9 +122,11 @@ async function* toAsync<T>(it: Iterable<T>): AsyncGenerator<T> {
 
 export class Pipeline {
   private readonly clock: () => number;
+  private readonly metrics: GatewayMetrics;
 
   constructor(private readonly deps: PipelineDeps) {
     this.clock = deps.clock ?? Date.now;
+    this.metrics = deps.metrics ?? noopMetrics;
   }
 
   private get config(): ResolvedConfig {
@@ -192,8 +210,12 @@ export class Pipeline {
     });
     if (!rate.allowed) {
       const headers = { ...rate.headers };
-      if (rate.retryAfterMs !== undefined)
+      if (rate.retryAfterMs !== undefined) {
         headers['retry-after'] = String(Math.max(1, Math.ceil(rate.retryAfterMs / 1000)));
+        headers['retry-after-ms'] = String(Math.max(1, Math.ceil(rate.retryAfterMs)));
+      }
+      const [scope = 'unknown', limit = 'unknown'] = (rate.rejectedBy ?? '').split(':');
+      this.metrics.rateLimited(scope, limit);
       throw new GatewayError(
         429,
         'rate_limit_exceeded',
@@ -208,6 +230,9 @@ export class Pipeline {
       preflightCostUsd,
     });
     if (!budget.allowed) {
+      // Release the TPM reservation: the request never reaches a provider.
+      await this.services.rateLimiter.reconcile(rate, 0).catch(() => undefined);
+      this.metrics.budgetRejected(rctx.key.team.slug);
       throw new GatewayError(
         402,
         'budget_exceeded',
@@ -257,6 +282,8 @@ export class Pipeline {
       h['x-sy-model'] = o.cachedFrom.model;
     }
     if (includeCost) h['x-sy-cost-usd'] = formatUsd(o.costUsd);
+    if (o.savedUsd > 0) h['x-sy-saved-usd'] = formatUsd(o.savedUsd);
+    if (o.extraHeaders) Object.assign(h, o.extraHeaders);
     return h;
   }
 
@@ -312,8 +339,8 @@ export class Pipeline {
       key_id: rctx.key.id,
       route: route.name,
       kind,
-      provider: o.model?.providerName ?? null,
-      model: o.model?.upstreamModel ?? null,
+      provider: o.model?.providerName ?? o.cachedFrom?.provider ?? null,
+      model: o.model?.upstreamModel ?? o.cachedFrom?.model ?? null,
       status: o.status,
       error_code: o.errorCode,
       cache: o.cache,
@@ -335,6 +362,12 @@ export class Pipeline {
       this.services.usage.emit(event);
     } catch (err) {
       rctx.logger.error({ err }, 'usage emission failed');
+    }
+    try {
+      this.metrics.request(event);
+      this.observeAttempts(route, o.attempts);
+    } catch (err) {
+      rctx.logger.warn({ err }, 'metrics update failed');
     }
     rctx.logger.info(
       {
@@ -360,6 +393,18 @@ export class Pipeline {
     );
   }
 
+  /** Derives retry/fallback counters from the attempt log (bounded labels: targets, codes). */
+  private observeAttempts(route: ResolvedRoute, attempts: AttemptRecord[]): void {
+    const relevant = attempts.filter((a) => a.outcome !== 'skipped' || a.code === 'circuit_open');
+    for (let i = 0; i + 1 < relevant.length; i++) {
+      const a = relevant[i]!;
+      const b = relevant[i + 1]!;
+      const reason = a.code ?? 'error';
+      if (a.target === b.target) this.metrics.retry(a.target, reason);
+      else this.metrics.fallback(route.name, a.target, b.target, reason);
+    }
+  }
+
   /** Converts a failure into a client error carrying the routing headers, after accounting. */
   private async fail(
     rctx: RequestContext,
@@ -382,14 +427,138 @@ export class Pipeline {
     throw gerr;
   }
 
-  private async cacheGet(key: string | undefined, rctx: RequestContext) {
-    if (!key || rctx.cacheMode === 'refresh') return null;
-    try {
-      return await this.services.cache.get(key);
-    } catch (err) {
-      rctx.logger.warn({ err }, 'cache lookup failed');
+  private async cacheGet(
+    key: string | undefined,
+    rctx: RequestContext,
+    route: ResolvedRoute,
+  ): Promise<CacheEntry | null> {
+    if (!key) {
+      // Only routes with an exact cache report lookups; uncached routes stay out of hit ratios.
+      if (route.cache?.exact) this.metrics.cacheLookup(route.name, 'exact', 'bypass');
       return null;
     }
+    if (rctx.cacheMode === 'refresh') {
+      this.metrics.cacheLookup(route.name, 'exact', 'bypass');
+      return null;
+    }
+    try {
+      const hit = await this.services.cache.get(key);
+      this.metrics.cacheLookup(route.name, 'exact', hit ? 'hit' : 'miss');
+      return hit;
+    } catch (err) {
+      this.metrics.platformError('cache');
+      rctx.logger.warn({ err }, 'cache lookup failed');
+      this.metrics.cacheLookup(route.name, 'exact', 'miss');
+      return null;
+    }
+  }
+
+  private async cacheGetMany(keys: string[], rctx: RequestContext): Promise<(CacheEntry | null)[]> {
+    if (rctx.cacheMode === 'refresh') return keys.map(() => null);
+    const cache = this.services.cache;
+    try {
+      return cache.getMany
+        ? await cache.getMany(keys)
+        : await Promise.all(keys.map((k) => cache.get(k)));
+    } catch (err) {
+      this.metrics.platformError('cache');
+      rctx.logger.warn({ err }, 'cache lookup failed');
+      return keys.map(() => null);
+    }
+  }
+
+  /** TTL for chat responses: exact TTL, else the semantic TTL, else 1 h. */
+  private chatTtl(route: ResolvedRoute): number {
+    return route.cache?.exact?.ttl_s ?? route.cache?.semantic?.ttl_s ?? 3600;
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Semantic cache
+  // -------------------------------------------------------------------------------------------
+
+  /** Whether the route's semantic cache applies to this request. */
+  private semanticEligible(route: ResolvedRoute, req: ChatRequest, rctx: RequestContext): boolean {
+    const sem = route.cache?.semantic;
+    if (!sem?.enabled || !sem.embed_route || !this.services.semantic) return false;
+    if (rctx.cacheMode === 'bypass') return false;
+    if ((req.n ?? 1) > 1) return false;
+    if (req.temperature != null && req.temperature !== 0) return false;
+    return !req.tools?.length;
+  }
+
+  /** Embeds the last user message with the route's `semantic.embed_route` (no limits/usage). */
+  private async embedForSemantic(
+    rctx: RequestContext,
+    embedRouteName: string,
+    text: string,
+  ): Promise<number[] | null> {
+    const embedRoute = this.config.routes[embedRouteName];
+    if (!embedRoute || embedRoute.kind !== 'embedding') return null;
+    const { value } = await this.deps.router.dispatch(
+      this.dispatchContext(rctx, embedRoute, []),
+      'embedding',
+      (adapter, m, actx) =>
+        adapter.embed!(
+          applyInputTemplates({ model: m.upstreamModel, input: text, input_type: 'query' }, m),
+          m,
+          actx,
+        ),
+    );
+    const emb = value.data[0]?.embedding;
+    return Array.isArray(emb) && emb.length > 0 ? emb : null;
+  }
+
+  /**
+   * Semantic lookup: on a hit returns the cached entry; on a miss returns what is needed to index
+   * the eventual response. Failures degrade to "no semantic cache" (logged).
+   */
+  private async semanticLookup(
+    rctx: RequestContext,
+    route: ResolvedRoute,
+    req: ChatRequest,
+  ): Promise<{ hit: CacheEntry; similarity: number } | { pending: SemanticPending } | null> {
+    const sem = route.cache!.semantic!;
+    const q = semanticQuery(req);
+    if (!q) return null;
+    try {
+      const vector = await this.embedForSemantic(rctx, sem.embed_route!, q.text);
+      if (!vector) return null;
+      const index = `${route.name}:${cacheScope(route, rctx.key.team.slug)}:${q.scope}`;
+      const pending = { index, vector, ttl: this.chatTtl(route) };
+      if (rctx.cacheMode === 'refresh') {
+        this.metrics.cacheLookup(route.name, 'semantic', 'bypass');
+        return { pending };
+      }
+      const match = await this.services.semantic!.search(index, vector, sem.min_similarity);
+      if (match) {
+        const entry = await this.services.cache.get(match.element);
+        if (entry && entry.payload.kind === 'chat') {
+          this.metrics.cacheLookup(route.name, 'semantic', 'hit');
+          return { hit: entry, similarity: match.similarity };
+        }
+        // Response expired from the exact cache: drop the stale vector.
+        void this.services.semantic!.remove(index, match.element).catch(() => undefined);
+      }
+      this.metrics.cacheLookup(route.name, 'semantic', 'miss');
+      return { pending };
+    } catch (err) {
+      this.metrics.platformError('cache');
+      rctx.logger.warn({ err: (err as Error).message }, 'semantic cache lookup failed');
+      return null;
+    }
+  }
+
+  private semanticIndex(
+    pending: SemanticPending | undefined,
+    cacheKey: string | undefined,
+    rctx: RequestContext,
+  ): void {
+    if (!pending || !cacheKey || !this.services.semantic) return;
+    this.services.semantic
+      .add(pending.index, pending.vector, cacheKey, { k: cacheKey, at: Date.now() }, pending.ttl)
+      .catch((err: unknown) =>
+        rctx.logger.warn({ err: (err as Error).message }, 'semantic index write failed'),
+      );
   }
 
   private cacheSet(
@@ -399,7 +568,7 @@ export class Pipeline {
     o: Outcome,
     rctx: RequestContext,
   ): void {
-    const ttl = route.cache?.exact?.ttl_s;
+    const ttl = payload.kind === 'chat' ? this.chatTtl(route) : route.cache?.exact?.ttl_s;
     if (!key || !ttl || !o.model) return;
     this.services.cache
       .set(
@@ -437,7 +606,8 @@ export class Pipeline {
     const route = this.resolveRoute(input.model, rctx.key, 'chat');
     const req = this.applyChatDefaults(input, route);
     const stream = req.stream === true;
-    const cacheable = isChatCacheable(route, req, rctx.cacheMode);
+    const semantic = this.semanticEligible(route, req, rctx);
+    const cacheable = isChatCacheable(route, req, rctx.cacheMode) || semantic;
     const o = this.newOutcome(rctx, stream, cacheable ? 'miss' : 'bypass');
     let admission: Admission | undefined;
     try {
@@ -447,13 +617,26 @@ export class Pipeline {
       admission = await this.admit(rctx, route, promptTokens, maxCompletion);
 
       const cacheKey = cacheable ? chatCacheKey(route, rctx.key.team.slug, req) : undefined;
-      const hit = await this.cacheGet(cacheKey, rctx);
+      let hit = await this.cacheGet(cacheKey, rctx, route);
+      let similarity: number | undefined;
+      let pending: SemanticPending | undefined;
+      if (semantic && !(hit && hit.payload.kind === 'chat')) {
+        const r = await this.semanticLookup(rctx, route, req);
+        if (r && 'hit' in r) {
+          hit = r.hit;
+          similarity = r.similarity;
+        } else if (r) {
+          pending = r.pending;
+        }
+      }
       if (hit && hit.payload.kind === 'chat') {
-        o.cache = 'hit';
+        o.cache = similarity === undefined ? 'hit' : 'semantic-hit';
+        if (similarity !== undefined)
+          o.extraHeaders = { 'x-sy-semantic-similarity': similarity.toFixed(4) };
         o.savedUsd = hit.costUsd;
         o.cachedFrom = { provider: hit.provider, model: hit.model };
+        // The body keeps the original usage; accounting records no upstream tokens for a hit.
         const response: ChatResponse = { ...hit.payload.response, model: route.name };
-        o.usage = response.usage;
         if (stream)
           return this.streamResult(
             rctx,
@@ -462,6 +645,7 @@ export class Pipeline {
             admission,
             req,
             toAsync(responseToChunks(response)),
+            undefined,
             undefined,
           );
         await this.account(rctx, route, 'chat', o, admission);
@@ -480,7 +664,7 @@ export class Pipeline {
           (adapter, m, actx) => adapter.chatStream({ ...req, stream: true }, m, actx),
         );
         o.model = model;
-        return this.streamResult(rctx, route, o, admission, req, chunks, cacheKey);
+        return this.streamResult(rctx, route, o, admission, req, chunks, cacheKey, pending);
       }
 
       const { value, model } = await this.deps.router.dispatch(dctx, 'chat', (adapter, m, actx) =>
@@ -493,6 +677,7 @@ export class Pipeline {
       const finish = response.choices[0]?.finish_reason;
       if (finish === 'stop' || finish === 'tool_calls' || finish === 'length') {
         this.cacheSet(cacheKey, route, { kind: 'chat', response: value }, o, rctx);
+        this.semanticIndex(pending, cacheKey, rctx);
       }
       await this.account(rctx, route, 'chat', o, admission);
       return {
@@ -518,6 +703,7 @@ export class Pipeline {
     req: ChatRequest,
     chunks: AsyncIterable<ChatChunk>,
     cacheKey: string | undefined,
+    pending: SemanticPending | undefined,
   ): PipelineResult {
     const includeUsage = req.stream_options?.include_usage === true;
     const acc = new ChunkAccumulator();
@@ -531,7 +717,7 @@ export class Pipeline {
         o.status = g.status;
         o.errorCode = g.code;
       }
-      if (o.cache !== 'hit' && o.model) {
+      if (o.cache !== 'hit' && o.cache !== 'semantic-hit' && o.model) {
         o.usage = acc.usage;
         o.costUsd = computeCost(acc.usage, o.model.pricing).costUsd;
         const finish = acc.finishReason;
@@ -540,6 +726,7 @@ export class Pipeline {
           (finish === 'stop' || finish === 'tool_calls' || finish === 'length')
         ) {
           this.cacheSet(cacheKey, route, { kind: 'chat', response: acc.toResponse() }, o, rctx);
+          this.semanticIndex(pending, cacheKey, rctx);
         }
       }
       await this.account(rctx, route, 'chat', o, admission);
@@ -590,7 +777,7 @@ export class Pipeline {
       kind: 'stream',
       status: 200,
       headers: {
-        ...this.headers(route, o, admission.rate, false),
+        ...this.headers(route, o, admission.rate, o.cache === 'hit' || o.cache === 'semantic-hit'),
         'content-type': 'text/event-stream; charset=utf-8',
         'cache-control': 'no-cache',
         connection: 'keep-alive',
@@ -617,8 +804,13 @@ export class Pipeline {
         texts.length > 0 ? estimateTextTokens(texts) : 0,
         0,
       );
+      if (!cacheable && route.cache?.exact) this.metrics.cacheLookup(route.name, 'exact', 'bypass');
+      // String inputs are cached per item; token-array inputs as a whole request.
+      if (cacheable && texts.length > 0) {
+        return await this.embeddingsPerItem(rctx, route, req, texts, o, admission);
+      }
       const cacheKey = cacheable ? embeddingCacheKey(route, rctx.key.team.slug, req) : undefined;
-      const hit = await this.cacheGet(cacheKey, rctx);
+      const hit = cacheable ? await this.cacheGet(cacheKey, rctx, route) : null;
       if (hit && hit.payload.kind === 'embedding') {
         o.cache = 'hit';
         o.savedUsd = hit.costUsd;
@@ -631,19 +823,7 @@ export class Pipeline {
           body: { ...hit.payload.response, model: route.name },
         };
       }
-      const { value, model } = await this.deps.router.dispatch(
-        this.dispatchContext(rctx, route, o.attempts),
-        'embedding',
-        (adapter, m, actx) =>
-          adapter.embed!(applyInputTemplates({ ...req, model: m.upstreamModel }, m), m, actx),
-      );
-      o.model = model;
-      o.usage = {
-        prompt_tokens: value.usage.prompt_tokens,
-        completion_tokens: 0,
-        total_tokens: value.usage.total_tokens,
-      };
-      o.costUsd = computeCost(o.usage, model.pricing).costUsd;
+      const { value } = await this.dispatchEmbedding(rctx, route, req, o);
       this.cacheSet(cacheKey, route, { kind: 'embedding', response: value }, o, rctx);
       await this.account(rctx, route, 'embedding', o, admission);
       const body: EmbeddingResponse = { ...value, model: route.name };
@@ -656,6 +836,148 @@ export class Pipeline {
     } catch (err) {
       return this.fail(rctx, route, 'embedding', o, admission, err);
     }
+  }
+
+  private async dispatchEmbedding(
+    rctx: RequestContext,
+    route: ResolvedRoute,
+    req: EmbeddingRequest,
+    o: Outcome,
+  ): Promise<{ value: EmbeddingResponse; model: ResolvedModel }> {
+    const { value, model } = await this.deps.router.dispatch(
+      this.dispatchContext(rctx, route, o.attempts),
+      'embedding',
+      (adapter, m, actx) =>
+        adapter.embed!(applyInputTemplates({ ...req, model: m.upstreamModel }, m), m, actx),
+    );
+    o.model = model;
+    o.usage = {
+      prompt_tokens: value.usage.prompt_tokens,
+      completion_tokens: 0,
+      total_tokens: value.usage.total_tokens,
+    };
+    o.costUsd = computeCost(o.usage, model.pricing).costUsd;
+    return { value, model };
+  }
+
+  /**
+   * Per-item embedding cache: every input string is its own cache entry. Hits are served from
+   * the cache, only the misses go upstream (one request, original order and titles preserved),
+   * and the merged response looks exactly like an uncached one. `x-sy-cache` is `hit` only when
+   * every item hit; `x-sy-cache-items: <hits>/<total>` reports partial hits.
+   */
+  private async embeddingsPerItem(
+    rctx: RequestContext,
+    route: ResolvedRoute,
+    req: EmbeddingRequest,
+    texts: string[],
+    o: Outcome,
+    admission: Admission,
+  ): Promise<PipelineResult> {
+    const rawTitles = Array.isArray(req.input_titles) ? (req.input_titles as unknown[]) : [];
+    const titles = texts.map((_, i) => {
+      const t = rawTitles[i];
+      return typeof t === 'string' && t.trim() ? t.trim() : null;
+    });
+    const keys = texts.map((t, i) =>
+      embeddingItemCacheKey(route, rctx.key.team.slug, req, t, titles[i]!),
+    );
+    const cached = await this.cacheGetMany(keys, rctx);
+    const items: (EmbeddingData['embedding'] | undefined)[] = cached.map((e) =>
+      e && e.payload.kind === 'embedding' ? e.payload.response.data[0]?.embedding : undefined,
+    );
+    const missIdx = items.flatMap((v, i) => (v === undefined ? [i] : []));
+    const hits = texts.length - missIdx.length;
+    let cachedTokens = 0;
+    for (let i = 0; i < texts.length; i++) {
+      if (items[i] === undefined) continue;
+      const entry = cached[i]!;
+      o.savedUsd += entry.costUsd;
+      if (entry.payload.kind === 'embedding')
+        cachedTokens += entry.payload.response.usage.prompt_tokens;
+      o.cachedFrom ??= { provider: entry.provider, model: entry.model };
+    }
+    o.savedUsd = Math.round(o.savedUsd * 1e10) / 1e10;
+    this.metrics.cacheLookup(route.name, 'exact', missIdx.length === 0 ? 'hit' : 'miss');
+    o.extraHeaders = { 'x-sy-cache-items': `${hits}/${texts.length}` };
+
+    let upstreamTokens = 0;
+    if (missIdx.length > 0) {
+      const sub: EmbeddingRequest = {
+        ...req,
+        input: missIdx.map((i) => texts[i]!),
+        ...(rawTitles.length > 0 ? { input_titles: missIdx.map((i) => titles[i]) } : {}),
+      };
+      const { value } = await this.dispatchEmbedding(rctx, route, sub, o);
+      upstreamTokens = value.usage.prompt_tokens;
+      const ordered = [...value.data].sort((a, b) => a.index - b.index);
+      if (ordered.length !== missIdx.length) {
+        throw new GatewayError(
+          502,
+          'upstream_error',
+          'Embedding upstream returned a different number of vectors',
+        );
+      }
+      // Split the upstream cost/tokens over items proportionally to their estimated size.
+      const est = missIdx.map((i) => Math.max(1, countTokens(texts[i]!)));
+      const estSum = est.reduce((a, b) => a + b, 0);
+      const ttl = route.cache?.exact?.ttl_s ?? 0;
+      const writes: { key: string; entry: CacheEntry; ttlSeconds: number }[] = [];
+      missIdx.forEach((idx, j) => {
+        const embedding = ordered[j]!.embedding;
+        items[idx] = embedding;
+        const share = est[j]! / estSum;
+        const tokens = Math.round(upstreamTokens * share);
+        writes.push({
+          key: keys[idx]!,
+          ttlSeconds: ttl,
+          entry: {
+            payload: {
+              kind: 'embedding',
+              response: {
+                object: 'list',
+                data: [{ object: 'embedding', index: 0, embedding }],
+                model: value.model,
+                usage: { prompt_tokens: tokens, total_tokens: tokens },
+              },
+            },
+            provider: o.model!.providerName,
+            model: o.model!.upstreamModel,
+            costUsd: Math.round(o.costUsd * share * 1e10) / 1e10,
+            createdAt: Date.now(),
+          },
+        });
+      });
+      if (ttl > 0) {
+        const cache = this.services.cache;
+        const write = cache.setMany
+          ? cache.setMany(writes)
+          : Promise.all(writes.map((w) => cache.set(w.key, w.entry, w.ttlSeconds))).then(
+              () => undefined,
+            );
+        write.catch((err: unknown) => rctx.logger.warn({ err }, 'cache write failed'));
+      }
+    } else {
+      o.cache = 'hit';
+    }
+    await this.account(rctx, route, 'embedding', o, admission);
+    const promptTokens = upstreamTokens + cachedTokens;
+    const body: EmbeddingResponse = {
+      object: 'list',
+      data: items.map((embedding, index) => ({
+        object: 'embedding',
+        index,
+        embedding: embedding!,
+      })),
+      model: route.name,
+      usage: { prompt_tokens: promptTokens, total_tokens: promptTokens },
+    };
+    return {
+      kind: 'json',
+      status: 200,
+      headers: this.headers(route, o, admission.rate, true),
+      body,
+    };
   }
 
   // -------------------------------------------------------------------------------------------
@@ -675,7 +997,7 @@ export class Pipeline {
         0,
       );
       const cacheKey = cacheable ? rerankCacheKey(route, rctx.key.team.slug, req) : undefined;
-      const hit = await this.cacheGet(cacheKey, rctx);
+      const hit = await this.cacheGet(cacheKey, rctx, route);
       if (hit && hit.payload.kind === 'rerank') {
         o.cache = 'hit';
         o.savedUsd = hit.costUsd;

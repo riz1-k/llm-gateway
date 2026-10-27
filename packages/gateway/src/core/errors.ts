@@ -20,7 +20,9 @@ export type GatewayErrorCode =
   | 'upstream_invalid_output'
   | 'request_aborted'
   | 'internal_error'
-  | 'not_found';
+  | 'not_found'
+  | 'conflict'
+  | 'service_unavailable';
 
 export type OpenAIErrorType =
   | 'invalid_request_error'
@@ -38,6 +40,7 @@ const DEFAULT_TYPE: Record<number, OpenAIErrorType> = {
   402: 'insufficient_quota',
   403: 'permission_error',
   404: 'invalid_request_error',
+  409: 'invalid_request_error',
   413: 'invalid_request_error',
   422: 'invalid_request_error',
   429: 'rate_limit_error',

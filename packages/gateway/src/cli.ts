@@ -2,18 +2,45 @@
 import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { startMockServer } from '@switchyard/mock-provider';
+import {
+  cmdBudgets,
+  cmdCache,
+  cmdKeys,
+  cmdMigrate,
+  cmdSeedDev,
+  cmdTeams,
+  cmdUsage,
+  cmdWorker,
+} from './cli/commands.js';
 import { ConfigError, loadConfig } from './config/load.js';
+import { GatewayError } from './core/errors.js';
 import { startServer } from './server.js';
 
 const HELP = `switchyard — OpenAI-compatible LLM gateway
 
 Usage:
   switchyard serve --config <file> [--port <n>] [--host <addr>]
+  switchyard worker --config <file> [--port <metrics-port>]
+  switchyard migrate --config <file> | --database-url <url>
   switchyard validate-config <file>
   switchyard mock-provider [--port 8790] [--host 127.0.0.1] [--latency-ms <n>] [--fail-rate <0..1>] [--fail-status <code>] [--seed <n>]
-  switchyard --version | --help
 
-Commands planned for the platform release: worker, migrate, keys, teams.
+Admin (local: --config <file> talks to Postgres/Redis directly;
+       remote: --url <gateway> --admin-token <token>, or SWITCHYARD_URL / SWITCHYARD_ADMIN_TOKEN):
+  switchyard teams create <slug> [--name N] [--monthly-budget USD] [--daily-budget USD] [--rpm N] [--tpm N]
+  switchyard teams list | get <slug> | delete <slug>
+  switchyard keys create --team <slug> [--name N] [--routes a,b] [--rpm N] [--tpm N] [--expires-in-days D]
+  switchyard keys list --team <slug> [--all]
+  switchyard keys revoke <key-id>
+  switchyard keys rotate <key-id> [--grace-s S]
+  switchyard budgets set --team <slug> [--monthly USD|none] [--daily USD|none] [--soft 0.8] [--action block|alert] [--webhook URL]
+  switchyard budgets show --team <slug>
+  switchyard usage [--team T] [--route R] [--model M] [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--group-by day|team|route|model|provider|key]
+  switchyard cache purge [--route R] [--team T]
+  switchyard seed-dev [--rotate] [--output <env-file>]
+  (add --json to admin commands for machine-readable output)
+
+  switchyard --version | --help
 `;
 
 function version(): string {
@@ -114,6 +141,22 @@ async function main(argv: string[]): Promise<number> {
       process.once('SIGTERM', stop);
       return -1;
     }
+    case 'migrate':
+      return cmdMigrate(rest);
+    case 'worker':
+      return cmdWorker(rest);
+    case 'teams':
+      return cmdTeams(rest);
+    case 'keys':
+      return cmdKeys(rest);
+    case 'budgets':
+      return cmdBudgets(rest);
+    case 'usage':
+      return cmdUsage(rest);
+    case 'cache':
+      return cmdCache(rest);
+    case 'seed-dev':
+      return cmdSeedDev(rest);
     default:
       process.stderr.write(`Unknown command "${command}".\n\n${HELP}`);
       return 2;
@@ -127,6 +170,10 @@ main(process.argv.slice(2)).then(
   (err: unknown) => {
     if (err instanceof ConfigError) {
       process.stderr.write(`✖ ${err.message}\n`);
+      process.exit(1);
+    }
+    if (err instanceof GatewayError) {
+      process.stderr.write(`✖ ${err.message} (${err.code})\n`);
       process.exit(1);
     }
     process.stderr.write(`✖ ${err instanceof Error ? err.message : String(err)}\n`);

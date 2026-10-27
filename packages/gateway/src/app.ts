@@ -2,6 +2,7 @@ import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { HTTPException } from 'hono/http-exception';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
+import { platformAdminRoutes } from './admin/routes.js';
 import { extractBearer, secretsEqual, StaticKeyStore } from './auth/keys.js';
 import { NoopCacheStore } from './cache/store.js';
 import { parseCacheMode } from './cache/keys.js';
@@ -17,6 +18,8 @@ import { initTokenizer } from './limits/estimate.js';
 import { NoopBudgetGuard } from './limits/budgets.js';
 import { NoopRateLimiter } from './limits/ratelimit.js';
 import { createLogger, type Logger } from './observability/logger.js';
+import { noopMetrics, PromMetrics, type GatewayMetrics } from './observability/metrics.js';
+import type { Platform } from './platform/index.js';
 import type { FetchLike } from './providers/http.js';
 import { ProviderRegistry, type AdapterFactory } from './providers/registry.js';
 import { MemoryBreakerStore } from './resilience/circuit-breaker.js';
@@ -36,6 +39,13 @@ export interface CreateGatewayOptions {
   reloadSource?: () => ResolvedConfig | Promise<ResolvedConfig>;
   random?: Random;
   clock?: () => number;
+  /**
+   * Redis/Postgres platform layer (`createPlatform(config)`): supplies services, metrics, the admin
+   * data API and readiness checks. Explicit `services` still take precedence.
+   */
+  platform?: Platform;
+  /** Instrumentation hooks (default: the platform's Prometheus registry, else no-op). */
+  metrics?: GatewayMetrics;
 }
 
 type Env = {
@@ -64,6 +74,7 @@ export interface Gateway {
   readonly config: ResolvedConfig;
   readonly services: GatewayServices;
   readonly logger: Logger;
+  readonly metrics: GatewayMetrics;
   /** Number of requests (including open streams) currently being served. */
   readonly inflight: number;
   /** Atomically swap to a new config; in-flight requests finish on the old snapshot. */
@@ -122,20 +133,34 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
     logger.warn({ err }, 'tokenizer unavailable; using heuristic estimates'),
   );
 
+  const platform = opts.platform;
+  const provided: Partial<GatewayServices> = { ...platform?.services, ...opts.services };
   const services: GatewayServices = {
-    keys: opts.services?.keys ?? new StaticKeyStore(opts.config.raw.auth.static_keys),
-    rateLimiter: opts.services?.rateLimiter ?? new NoopRateLimiter(),
-    budgets: opts.services?.budgets ?? new NoopBudgetGuard(),
-    cache: opts.services?.cache ?? new NoopCacheStore(),
-    usage: opts.services?.usage ?? new LogUsageSink(logger.child({ component: 'usage' })),
-    breakers: opts.services?.breakers ?? new MemoryBreakerStore(opts.clock),
+    keys: provided.keys ?? new StaticKeyStore(opts.config.raw.auth.static_keys),
+    rateLimiter: provided.rateLimiter ?? new NoopRateLimiter(),
+    budgets: provided.budgets ?? new NoopBudgetGuard(),
+    cache: provided.cache ?? new NoopCacheStore(),
+    usage: provided.usage ?? new LogUsageSink(logger.child({ component: 'usage' })),
+    breakers: provided.breakers ?? new MemoryBreakerStore(opts.clock),
+    semantic: provided.semantic,
   };
-  const keysFromConfig = !opts.services?.keys;
+  const keysFromConfig = !provided.keys;
+  const metrics: GatewayMetrics = opts.metrics ?? platform?.metrics ?? noopMetrics;
+  const prom = metrics instanceof PromMetrics ? metrics : undefined;
   const concurrency = new ConcurrencyManager();
   const strategies = new StrategyRegistry(opts.random);
   const startedAt = nowSeconds();
   let draining = false;
   let inflight = 0;
+  prom?.setSources({
+    circuitStates: async () =>
+      (await services.breakers.snapshot(current.config.breaker)).map((b) => ({
+        target: b.target,
+        state: b.state === 'closed' ? 0 : b.state === 'half_open' ? 1 : 2,
+      })),
+    inflight: () =>
+      Object.fromEntries(Object.entries(concurrency.stats()).map(([p, st]) => [p, st.inflight])),
+  });
 
   const build = (config: ResolvedConfig): Snapshot => {
     const registry = new ProviderRegistry(
@@ -147,6 +172,7 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
       breakers: services.breakers,
       concurrency,
       strategies,
+      metrics,
       ...(opts.random ? { random: opts.random } : {}),
       ...(opts.clock ? { clock: opts.clock } : {}),
     });
@@ -154,6 +180,7 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
       config,
       router,
       services,
+      metrics,
       ...(opts.clock ? { clock: opts.clock } : {}),
     });
     for (const w of config.warnings) logger.warn(w);
@@ -226,6 +253,14 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
       status: 'ready',
       routes: Object.keys(current.config.routes).length,
     };
+    if (platform) {
+      const checks = await platform.readiness();
+      body.checks = checks;
+      if (Object.values(checks).some((ch) => !ch.ok)) {
+        body.status = 'unavailable';
+        return c.json(body, 503);
+      }
+    }
     if (c.req.query('probe') === '1') {
       const checks = await Promise.all(
         current.registry
@@ -269,7 +304,20 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
     );
     return c.json({ breakers, concurrency: concurrency.stats(), ewma_latency_ms: latency });
   });
+  admin.route(
+    '/',
+    platformAdminRoutes({ getService: () => platform?.admin, config: () => current.config }),
+  );
   app.route('/admin', admin);
+
+  // --- Prometheus ------------------------------------------------------------------------------
+  const metricsCfg = opts.config.raw.metrics;
+  if (prom && metricsCfg.port === undefined) {
+    app.get(metricsCfg.path, async (c) => {
+      const { contentType, body } = await prom.expose();
+      return c.body(body, 200, { 'content-type': contentType });
+    });
+  }
 
   // --- OpenAI-compatible API ------------------------------------------------------------------
   const v1 = new Hono<Env>();
@@ -392,6 +440,7 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
     },
     services,
     logger,
+    metrics,
     get inflight() {
       return inflight;
     },
@@ -401,6 +450,7 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
         throw new GatewayError(400, 'invalid_request', 'No config source available for reload');
       const old = current;
       current = build(next);
+      platform?.setConfig(next);
       if (keysFromConfig) services.keys = new StaticKeyStore(next.raw.auth.static_keys);
       old.retired = true;
       if (old.refs === 0) await old.registry.close();
@@ -419,6 +469,7 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
       await services.usage.flush?.();
       await services.usage.close?.();
       await services.keys.close?.();
+      await platform?.close();
     },
   };
   return gateway;

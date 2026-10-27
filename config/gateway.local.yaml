@@ -183,5 +183,13 @@ routes:
 limits:
   defaults: { key: { rpm: 600, tpm: 2000000 }, team: { rpm: 1200, tpm: 5000000 } }
 budgets: { enforcement: hard, soft_threshold: 0.8, alert_webhook: null }
-usage: { stream: 'sy:usage', batch_size: 500, flush_interval_ms: 1000, retention_days: 400 }
+# Dev: the gateway also runs the usage writer (stream → Postgres), so no separate worker is
+# needed. Deployments run `switchyard worker` instead and leave this false.
+usage:
+  stream: 'sy:usage'
+  batch_size: 500
+  flush_interval_ms: 1000
+  retention_days: 400
+  in_process_writer: true
+metrics: { enabled: true, path: /metrics }
 observability: { log_level: '${LOG_LEVEL:-info}', log_bodies: false, metrics: true }

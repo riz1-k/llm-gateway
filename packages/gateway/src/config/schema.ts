@@ -260,12 +260,29 @@ export const configSchema = z.object({
       shutdown_grace_ms: ms.default(15_000),
     })
     .prefault({}),
-  redis: z.object({ url: optionalString, key_prefix: z.string().default('sy:') }).optional(),
-  database: z.object({ url: optionalString }).optional(),
+  redis: z
+    .object({
+      url: optionalString,
+      key_prefix: z.string().default('sy:'),
+      /** Admit requests when Redis is unreachable (rate limits / budgets are skipped, logged). */
+      fail_open: z.boolean().default(true),
+      connect_timeout_ms: ms.default(5_000),
+    })
+    .optional(),
+  database: z
+    .object({
+      url: optionalString,
+      pool_max: positiveInt.max(100).default(10),
+    })
+    .optional(),
   auth: z
     .object({
       admin_token: optionalString,
       static_keys: z.array(staticKeySchema).default([]),
+      /** TTL of the Redis key-record cache (DB keys). Revocation is pushed via pub/sub. */
+      key_cache_ttl_s: positiveInt.default(60),
+      /** TTL of the per-process key cache in front of Redis. */
+      local_key_cache_ttl_ms: nonNegInt.default(5_000),
     })
     .prefault({}),
   /** Path to the pricing table (relative to the config file). */
@@ -283,6 +300,8 @@ export const configSchema = z.object({
           team: z.object({ rpm: positiveInt.optional(), tpm: positiveInt.optional() }).optional(),
         })
         .optional(),
+      /** Sliding-window length; RPM/TPM are defined per window (keep at 60). */
+      window_s: positiveInt.default(60),
     })
     .optional(),
   budgets: z
@@ -290,6 +309,10 @@ export const configSchema = z.object({
       enforcement: z.enum(['hard', 'soft', 'off']).default('hard'),
       soft_threshold: z.coerce.number().min(0).max(1).default(0.8),
       alert_webhook: z.string().nullable().optional(),
+      /** How often the worker reconciles Redis spend counters from Postgres rollups. */
+      reconcile_interval_s: positiveInt.default(300),
+      /** TTL of the per-process cache of team budget definitions. */
+      definitions_ttl_ms: nonNegInt.default(30_000),
     })
     .optional(),
   usage: z
@@ -299,8 +322,27 @@ export const configSchema = z.object({
       flush_interval_ms: ms.default(1000),
       retention_days: positiveInt.default(400),
       in_process_writer: z.boolean().default(false),
+      /** Approximate MAXLEN for XADD. */
+      stream_maxlen: positiveInt.default(1_000_000),
+      /** Events kept in memory while Redis is unavailable; older events are dropped beyond this. */
+      buffer_max: positiveInt.default(10_000),
+      consumer_group: z.string().default('writers'),
+      /** Pending entries idle longer than this are reclaimed (XAUTOCLAIM) from dead consumers. */
+      claim_idle_ms: ms.default(60_000),
+      /** Monthly partitions created ahead of time. */
+      partitions_ahead: nonNegInt.max(24).default(2),
     })
     .optional(),
+  metrics: z
+    .object({
+      enabled: z.boolean().default(true),
+      /** Serve /metrics on a separate port (e.g. 9464) instead of the API port. */
+      port: port.optional(),
+      path: z.string().default('/metrics'),
+      /** Include prom-client's Node.js process metrics. */
+      default_metrics: z.boolean().default(true),
+    })
+    .prefault({}),
   observability: z
     .object({
       log_level: z

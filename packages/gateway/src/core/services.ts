@@ -7,6 +7,7 @@
  *   → CacheStore.get → dispatch (router, BreakerStore) → account: cost → RateLimiter.reconcile
  *   → BudgetGuard.record → CacheStore.set → UsageSink.emit
  */
+import type { SemanticIndex } from '../cache/semantic.js';
 import type { BreakerStore } from '../resilience/circuit-breaker.js';
 import type { ChatResponse, EmbeddingResponse, OperationKind, RerankResponse } from './types.js';
 
@@ -15,9 +16,14 @@ import type { ChatResponse, EmbeddingResponse, OperationKind, RerankResponse } f
 // ---------------------------------------------------------------------------------------------
 
 export interface Team {
+  /** DB uuid, or `team:<slug>` for static keys whose team has no DB row. */
   id: string;
+  /** Immutable, unique; usage, budgets and rate-limit counters are keyed by slug. */
   slug: string;
   name: string;
+  /** Team-scope limit overrides (fall back to `limits.defaults.team`). */
+  rpmLimit?: number | undefined;
+  tpmLimit?: number | undefined;
 }
 
 export interface ApiKeyRecord {
@@ -106,6 +112,9 @@ export interface CacheEntry {
 export interface CacheStore {
   get(key: string): Promise<CacheEntry | null>;
   set(key: string, entry: CacheEntry, ttlSeconds: number): Promise<void>;
+  /** Batched lookup (per-item embedding cache). Falls back to parallel get() when absent. */
+  getMany?(keys: string[]): Promise<(CacheEntry | null)[]>;
+  setMany?(items: { key: string; entry: CacheEntry; ttlSeconds: number }[]): Promise<void>;
   purge?(prefix?: string): Promise<number>;
 }
 
@@ -155,4 +164,6 @@ export interface GatewayServices {
   cache: CacheStore;
   usage: UsageSink;
   breakers: BreakerStore;
+  /** Vector index for the semantic cache (opt-in per route); absent = semantic cache off. */
+  semantic?: SemanticIndex | undefined;
 }

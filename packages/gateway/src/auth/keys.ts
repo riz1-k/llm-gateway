@@ -1,10 +1,33 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { ApiKeyRecord, KeyStore } from '../core/services.js';
 import type { GatewayConfig } from '../config/schema.js';
 
 export const hashKey = (key: string): string => createHash('sha256').update(key).digest('hex');
 
 export const keyPrefix = (key: string): string => key.slice(0, 12);
+
+const BASE62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+export const API_KEY_PREFIX = 'sk-sy-';
+export const API_KEY_RANDOM_CHARS = 40;
+
+/**
+ * New virtual key: `sk-sy-` + 40 base62 chars (≈ 238 bits) from the CSPRNG, using rejection
+ * sampling so every character is uniformly distributed (no modulo bias).
+ */
+export function generateApiKey(): string {
+  let out = API_KEY_PREFIX;
+  while (out.length < API_KEY_PREFIX.length + API_KEY_RANDOM_CHARS) {
+    for (const byte of randomBytes(64)) {
+      if (byte >= 248) continue; // 248 = 4 × 62
+      out += BASE62[byte % 62];
+      if (out.length === API_KEY_PREFIX.length + API_KEY_RANDOM_CHARS) break;
+    }
+  }
+  return out;
+}
+
+export const isGeneratedKeyFormat = (key: string): boolean =>
+  new RegExp(`^${API_KEY_PREFIX}[0-9A-Za-z]{${API_KEY_RANDOM_CHARS}}$`).test(key);
 
 /** Extracts the presented credential from `Authorization: Bearer …` or `x-api-key`. */
 export function extractBearer(headers: Headers): string | undefined {

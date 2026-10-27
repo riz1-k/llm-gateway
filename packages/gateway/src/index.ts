@@ -77,3 +77,44 @@ export {
   type CircuitState,
 } from './resilience/circuit-breaker.js';
 export { createLogger, type Logger } from './observability/logger.js';
+
+// --- Platform layer (Redis + Postgres) ---------------------------------------------------------
+export {
+  createPlatform,
+  type Platform,
+  type PlatformOptions,
+  type ReadinessCheck,
+} from './platform/index.js';
+export { createRedisClient, RedisKeys } from './platform/redis.js';
+export { InvalidationBus, type InvalidationMessage } from './platform/invalidation.js';
+export { createDatabase, type Database, type DatabaseOptions } from './db/client.js';
+export { runMigrations, migrationsFolder, type MigrationResult } from './db/migrate.js';
+export * as dbSchema from './db/schema.js';
+export { generateApiKey, isGeneratedKeyFormat } from './auth/keys.js';
+export { PlatformKeyStore } from './auth/db-key-store.js';
+export { RedisRateLimiter, rateLimitHeaders, formatDuration } from './limits/redis-ratelimit.js';
+export {
+  RedisBudgetGuard,
+  StaticBudgetSource,
+  type BudgetAlert,
+  type BudgetDefinition,
+  type BudgetSource,
+} from './limits/redis-budgets.js';
+export { DbBudgetSource } from './limits/db-budget-source.js';
+export { periodWindow, projectSpend, type BudgetPeriod } from './limits/periods.js';
+export { RedisCacheStore } from './cache/redis-cache.js';
+export {
+  RedisVectorIndex,
+  semanticQuery,
+  type SemanticIndex,
+  type SemanticMatch,
+} from './cache/semantic.js';
+export { RedisBreakerStore } from './resilience/redis-breaker.js';
+export { RedisStreamUsageSink } from './usage/stream-sink.js';
+export { UsageWorker, type UsageWorkerOptions, type WorkerStats } from './usage/worker.js';
+export { writeUsageBatch } from './usage/writer.js';
+export { queryUsage, type UsageQuery, type UsageReport, type GroupBy } from './usage/reports.js';
+export { reconcileBudgets } from './usage/reconcile.js';
+export { streamLag } from './usage/stream.js';
+export { AdminService } from './admin/service.js';
+export { PromMetrics, noopMetrics, type GatewayMetrics } from './observability/metrics.js';

@@ -15,9 +15,17 @@ server:
   body_limit_mb: 10
   shutdown_grace_ms: 15000 # SIGTERM: stop accepting, drain in-flight up to this long
 
-# Parsed now, used by the platform subsystems (keys/teams, cache, rate limits, budgets, usage).
-redis: { url: '${REDIS_URL:-redis://localhost:6379/0}', key_prefix: 'sy:' }
-database: { url: '${DATABASE_URL:-postgres://dev:dev@localhost:5432/llmgateway}' }
+# Platform (docs/ADMIN.md). Setting redis.url and/or database.url enables it:
+#   redis    → rate limits, response cache (exact + semantic), shared breakers, usage stream, budget counters
+#   database → DB virtual keys/teams, budgets, usage tables, admin API (run `switchyard migrate` first)
+redis:
+  url: '${REDIS_URL:-redis://localhost:6379/0}'
+  key_prefix: 'sy:' # every key (and the pub/sub channel) is prefixed; share one Redis between envs
+  fail_open: true # Redis down → admit (limits/budgets skipped, logged); false → 503
+  connect_timeout_ms: 5000
+database:
+  url: '${DATABASE_URL:-postgres://dev:dev@localhost:5432/llmgateway}'
+  pool_max: 10
 
 auth:
   admin_token: ${SWITCHYARD_ADMIN_TOKEN:-} # Bearer token for /admin/*; empty disables admin
@@ -29,6 +37,8 @@ auth:
       # allow_direct_models: false             # true = may call `models:` entries by name
       # rpm: 600                               # per-key overrides (enforced by the rate limiter)
       # tpm: 2000000
+  key_cache_ttl_s: 60 # Redis cache of DB key records (revocation is pushed via pub/sub)
+  local_key_cache_ttl_ms: 5000 # per-process cache in front of Redis
 
 pricing_file: ./pricing.json # USD per 1M tokens; per-model `pricing:` overrides it
 
@@ -113,7 +123,12 @@ routes: # virtual models — the only names clients use
     strategy: fallback # fallback | weighted | least-latency
     retry: { attempts: 2, backoff_ms: 250, max_backoff_ms: 4000 }
     timeout_ms: 120000 # total deadline across retries + fallbacks
-    cache: { exact: { ttl_s: 86400 }, semantic: { enabled: false } }
+    # exact: canonical-request cache (per team unless shared: true). semantic: Redis vector sets;
+    # needs an embedding route; min_similarity is cosine similarity (0..1).
+    cache:
+      exact: { ttl_s: 86400 }
+      semantic: { enabled: false, embed_route: embed, min_similarity: 0.95, ttl_s: 86400 }
+      shared: false
     defaults: { reasoning_effort: null } # applied when the request omits the field
   judge:
     targets: [copilot-sonnet]
@@ -131,11 +146,33 @@ routes: # virtual models — the only names clients use
   rerank: { targets: [local-rerank] }
   rag-mock: { targets: [mock-rag], hidden: true } # hidden = callable but not in /v1/models
 
-# Enforced by the platform release (parsed and validated today).
+# Sliding-window RPM/TPM per key and per team; key/team records override these defaults.
 limits:
   defaults: { key: { rpm: 600, tpm: 2000000 }, team: { rpm: 1200, tpm: 5000000 } }
-budgets: { enforcement: hard, soft_threshold: 0.8, alert_webhook: null }
-usage: { stream: 'sy:usage', batch_size: 500, flush_interval_ms: 1000, retention_days: 400 }
+  window_s: 60
+# Team budgets live in Postgres (admin API / `switchyard budgets set`); these are global settings.
+budgets:
+  enforcement: hard # hard = 402 when spent + pre-flight > limit (action: block) | soft = alerts only | off
+  soft_threshold: 0.8 # default for new budgets
+  alert_webhook: null # default webhook for soft/exceeded alerts (a budget's webhook_url wins)
+  reconcile_interval_s: 300 # worker resyncs Redis spend counters from usage_daily
+  definitions_ttl_ms: 30000
+usage:
+  stream: 'sy:usage' # Redis stream (XADD … MAXLEN ~ stream_maxlen)
+  stream_maxlen: 1000000
+  buffer_max: 10000 # in-memory events kept while Redis is down; oldest dropped beyond (metric)
+  consumer_group: writers
+  batch_size: 500
+  flush_interval_ms: 1000
+  claim_idle_ms: 60000 # XAUTOCLAIM entries left pending by a dead worker
+  retention_days: 400 # monthly partitions older than this are dropped
+  partitions_ahead: 2
+  in_process_writer: false # true = the gateway also runs the worker (single-process dev setups)
+metrics:
+  enabled: true
+  path: /metrics
+  # port: 9464 # serve /metrics on its own port instead of the API port
+  default_metrics: true # prom-client Node.js process metrics
 observability:
   log_level: info # fatal | error | warn | info | debug | trace | silent
   log_bodies: false # prompts/completions are never logged unless enabled

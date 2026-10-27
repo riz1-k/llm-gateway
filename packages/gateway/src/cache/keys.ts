@@ -89,3 +89,31 @@ export function rerankCacheKey(route: ResolvedRoute, team: string, req: RerankRe
   });
   return `rr:${route.name}:${scope(route, team)}:${sha256(material)}`;
 }
+
+/**
+ * Per-input-item embedding cache key: one entry per (route, scope, text, input_type, title,
+ * dimensions, encoding_format), so re-ingesting a corpus only embeds new/changed chunks even when
+ * batches are composed differently.
+ */
+export function embeddingItemCacheKey(
+  route: ResolvedRoute,
+  team: string,
+  req: EmbeddingRequest,
+  text: string,
+  title: string | null,
+): string {
+  const material = canonicalJSON({
+    route: route.name,
+    text,
+    title,
+    input_type: req.input_type,
+    dimensions: req.dimensions,
+    encoding_format: req.encoding_format,
+  });
+  return `embi:${route.name}:${scope(route, team)}:${sha256(material)}`;
+}
+
+/** Cache scope segment used in keys and semantic index names (`shared` or `team:<slug>`). */
+export function cacheScope(route: ResolvedRoute, team: string): string {
+  return scope(route, team);
+}
