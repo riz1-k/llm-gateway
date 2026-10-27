@@ -48,19 +48,39 @@ function scope(route: ResolvedRoute, team: string): string {
   return route.cache?.shared ? 'shared' : `team:${team}`;
 }
 
+/**
+ * Chat request fields that do not take part in the cache key: transport options, attribution,
+ * fields normalized separately (`max_tokens`), and sampling fields that are fixed for every
+ * cacheable request (`temperature` 0/unset, `n` ≤ 1 — see {@link isChatCacheable}).
+ * Everything else — including passthrough fields such as `logprobs`, `logit_bias`,
+ * `parallel_tool_calls` or `metadata` — changes the response and is part of the key.
+ */
+const CHAT_KEY_IGNORED = new Set([
+  'model',
+  'stream',
+  'stream_options',
+  'user',
+  'max_tokens',
+  'max_completion_tokens',
+  'temperature',
+  'n',
+]);
+
+/** The parts of a chat request that determine its response (messages excluded on request). */
+export function chatKeyMaterial(
+  req: ChatRequest,
+  opts: { withoutMessages?: boolean } = {},
+): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(req)) {
+    if (CHAT_KEY_IGNORED.has(k) || (opts.withoutMessages && k === 'messages')) continue;
+    params[k] = v;
+  }
+  return { params, max_tokens: req.max_completion_tokens ?? req.max_tokens };
+}
+
 export function chatCacheKey(route: ResolvedRoute, team: string, req: ChatRequest): string {
-  const material = canonicalJSON({
-    route: route.name,
-    messages: req.messages,
-    tools: req.tools,
-    tool_choice: req.tool_choice,
-    response_format: req.response_format,
-    max_tokens: req.max_completion_tokens ?? req.max_tokens,
-    stop: req.stop,
-    top_p: req.top_p,
-    reasoning_effort: req.reasoning_effort,
-    seed: req.seed,
-  });
+  const material = canonicalJSON({ route: route.name, ...chatKeyMaterial(req) });
   return `chat:${route.name}:${scope(route, team)}:${sha256(material)}`;
 }
 

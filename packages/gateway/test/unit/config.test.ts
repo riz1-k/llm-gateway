@@ -214,7 +214,11 @@ describe('shipped configs', () => {
         'opsagent-judge',
       ].sort(),
     );
-    expect(cfg.routes['docsqa-judge']!.defaults.reasoning_effort).toBe('medium');
+    // Judge routes run on Copilot Haiku with Sonnet fallback (commit 08d9ce9, quota).
+    expect(cfg.routes['docsqa-judge']!.targets.map((t) => t.model)).toEqual([
+      'copilot-haiku',
+      'copilot-sonnet',
+    ]);
     expect(cfg.models['copilot-sonnet']!.pricing).toMatchObject({ input: 2, output: 10 });
   });
 

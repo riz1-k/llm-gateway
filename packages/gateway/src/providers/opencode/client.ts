@@ -51,8 +51,40 @@ export interface PromptBody {
   model: { providerID: string; modelID: string };
   system?: string;
   variant?: string;
+  /** Per-message tool switches (opencode merges them into the agent's permissions). */
+  tools?: Record<string, boolean>;
   parts: OpencodePart[];
 }
+
+/**
+ * Defense in depth: every prompt disables opencode's tools, so a missing or misconfigured
+ * `gateway` agent can never let request content (which API clients control, including
+ * prompt-injected documents) run shell commands, edit files or fetch URLs on the opencode host.
+ * The gateway emulates tool calling itself; opencode only ever needs to generate text.
+ */
+export const OPENCODE_DISABLED_TOOLS: Readonly<Record<string, boolean>> = Object.freeze({
+  '*': false,
+  bash: false,
+  read: false,
+  list: false,
+  glob: false,
+  grep: false,
+  edit: false,
+  write: false,
+  patch: false,
+  apply_patch: false,
+  multiedit: false,
+  task: false,
+  webfetch: false,
+  websearch: false,
+  codesearch: false,
+  todowrite: false,
+  todoread: false,
+  skill: false,
+  lsp: false,
+  batch: false,
+  question: false,
+});
 
 export class OpencodeClient {
   readonly authHeader: string | undefined;

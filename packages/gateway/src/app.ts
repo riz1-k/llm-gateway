@@ -8,7 +8,7 @@ import { NoopCacheStore } from './cache/store.js';
 import { parseCacheMode } from './cache/keys.js';
 import type { ResolvedConfig } from './config/resolve.js';
 import { GatewayError } from './core/errors.js';
-import { resolveRequestId, nowSeconds } from './core/ids.js';
+import { newRequestId, resolveRequestId, nowSeconds } from './core/ids.js';
 import { Pipeline, type PipelineResult, type RequestContext } from './core/pipeline.js';
 import { Router } from './core/router.js';
 import type { ApiKeyRecord, GatewayServices } from './core/services.js';
@@ -51,6 +51,7 @@ export interface CreateGatewayOptions {
 type Env = {
   Variables: {
     requestId: string;
+    usageId: string;
     startedAt: number;
     logger: Logger;
     key: ApiKeyRecord;
@@ -82,6 +83,17 @@ export interface Gateway {
   /** Readiness → 503; used during graceful shutdown. */
   setDraining(draining: boolean): void;
   close(): Promise<void>;
+}
+
+/**
+ * Attribution fields are copied into every usage event (Redis stream → Postgres), so they are
+ * bounded: an unbounded `user` would let one client inflate shared Redis/Postgres storage.
+ */
+const MAX_END_USER_LENGTH = 256;
+const MAX_TAG_LENGTH = 128;
+
+function clip<T extends string | undefined>(value: T, max: number): T {
+  return (value !== undefined && value.length > max ? value.slice(0, max) : value) as T;
 }
 
 /** Wraps a body stream so `onDone` runs exactly once when it completes, errors or is cancelled. */
@@ -198,8 +210,14 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
 
   // --- request context: id, logger, timing, in-flight tracking --------------------------------
   app.use('*', async (c, next) => {
-    const requestId = resolveRequestId(c.req.header('x-request-id'));
+    const clientId = c.req.header('x-request-id');
+    const requestId = resolveRequestId(clientId);
     c.set('requestId', requestId);
+    // The usage ledger is idempotent on (ts, request_id). A client-chosen id is not unique
+    // (reused, or sent by concurrent calls), and same-millisecond duplicates would be dropped as
+    // redeliveries — under-counting spend. Usage events get a server-unique id that keeps the
+    // client's id as a searchable prefix.
+    c.set('usageId', requestId === clientId ? `${requestId}:${newRequestId()}` : requestId);
     c.set('startedAt', opts.clock?.() ?? Date.now());
     c.set('logger', logger.child({ requestId }));
     inflight++;
@@ -245,6 +263,12 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
     ),
   );
 
+  const isAdmin = (headers: Headers): boolean => {
+    const token = extractBearer(headers);
+    const expected = current.config.raw.auth.admin_token;
+    return Boolean(expected && token && secretsEqual(token, expected));
+  };
+
   // --- health ---------------------------------------------------------------------------------
   app.get('/healthz', (c) => c.json({ status: 'ok' }));
   app.get('/readyz', async (c) => {
@@ -262,6 +286,9 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
       }
     }
     if (c.req.query('probe') === '1') {
+      // Probing fans out to every upstream and returns their error details: admin only.
+      if (!isAdmin(c.req.raw.headers))
+        throw new GatewayError(401, 'invalid_api_key', 'Provider probes require the admin token');
       const checks = await Promise.all(
         current.registry
           .entries()
@@ -280,16 +307,31 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
     return c.json(body);
   });
 
+  const limitBody: MiddlewareHandler<Env> = async (c, next) => {
+    const max = current.config.raw.server.body_limit_mb * 1024 * 1024;
+    const limiter = bodyLimit({
+      maxSize: max,
+      onError: () => {
+        throw new GatewayError(
+          413,
+          'invalid_request',
+          `Request body exceeds ${current.config.raw.server.body_limit_mb} MB`,
+        );
+      },
+    }) as MiddlewareHandler<Env>;
+    return limiter(c, next);
+  };
+
   // --- admin (minimal in core; wave H adds the full admin API) -------------------------------
   const admin = new Hono<Env>();
   admin.use('*', async (c, next) => {
-    const token = extractBearer(c.req.raw.headers);
-    const expected = current.config.raw.auth.admin_token;
-    if (!expected || !token || !secretsEqual(token, expected)) {
+    if (!isAdmin(c.req.raw.headers)) {
       throw new GatewayError(401, 'invalid_api_key', 'Invalid admin token');
     }
     await next();
   });
+  // Admin bodies are small JSON documents; apply the same body limit as /v1.
+  admin.use('*', limitBody);
   admin.post('/config/reload', async (c) => {
     const cfg = await gateway.reload();
     return c.json({ status: 'reloaded', routes: Object.keys(cfg.routes), warnings: cfg.warnings });
@@ -334,20 +376,6 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
     c.set('key', key);
     await next();
   });
-  const limitBody: MiddlewareHandler<Env> = async (c, next) => {
-    const max = current.config.raw.server.body_limit_mb * 1024 * 1024;
-    const limiter = bodyLimit({
-      maxSize: max,
-      onError: () => {
-        throw new GatewayError(
-          413,
-          'invalid_request',
-          `Request body exceeds ${current.config.raw.server.body_limit_mb} MB`,
-        );
-      },
-    }) as MiddlewareHandler<Env>;
-    return limiter(c, next);
-  };
   v1.use('*', limitBody);
 
   const readJson = async (c: Context<Env>): Promise<unknown> => {
@@ -361,17 +389,18 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
   const requestContext = (c: Context<Env>): RequestContext => {
     const tags = (c.req.header('x-sy-tags') ?? '')
       .split(',')
-      .map((t) => t.trim())
+      .map((t) => clip(t.trim(), MAX_TAG_LENGTH))
       .filter(Boolean)
       .slice(0, 32);
     return {
       requestId: c.get('requestId'),
+      usageId: c.get('usageId'),
       startedAt: c.get('startedAt'),
       logger: c.get('logger'),
       headers: c.req.raw.headers,
       signal: c.req.raw.signal,
       key: c.get('key'),
-      endUser: c.req.header('x-sy-user') ?? undefined,
+      endUser: clip(c.req.header('x-sy-user'), MAX_END_USER_LENGTH),
       tags,
       cacheMode: parseCacheMode(c.req.header('x-sy-cache')),
     };
@@ -404,11 +433,15 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
 
   v1.post('/chat/completions', async (c) => {
     const req = parseChatRequest(await readJson(c));
-    return run(c, (p, rctx) => p.chat({ ...rctx, endUser: rctx.endUser ?? req.user }, req));
+    return run(c, (p, rctx) =>
+      p.chat({ ...rctx, endUser: rctx.endUser ?? clip(req.user, MAX_END_USER_LENGTH) }, req),
+    );
   });
   v1.post('/embeddings', async (c) => {
     const req = parseEmbeddingRequest(await readJson(c));
-    return run(c, (p, rctx) => p.embeddings({ ...rctx, endUser: rctx.endUser ?? req.user }, req));
+    return run(c, (p, rctx) =>
+      p.embeddings({ ...rctx, endUser: rctx.endUser ?? clip(req.user, MAX_END_USER_LENGTH) }, req),
+    );
   });
   v1.post('/rerank', async (c) => {
     const req = parseRerankRequest(await readJson(c));

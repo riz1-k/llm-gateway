@@ -316,7 +316,8 @@ describe('pipeline behaviors', () => {
       { 'x-sy-tags': 'eval, case:q017', 'x-request-id': 'my-trace-1' },
     );
     expect(usage.events[0]).toMatchObject({
-      request_id: 'my-trace-1',
+      // client id kept as prefix; server suffix keeps ledger ids unique
+      request_id: expect.stringMatching(/^my-trace-1:req_[A-Za-z0-9]{24}$/),
       end_user: 'u-1',
       tags: ['eval', 'case:q017'],
       team: 'test',
@@ -444,10 +445,17 @@ describe('HTTP contract', () => {
   it('health, readiness and draining', async () => {
     const { request, gateway } = testGateway(testConfig(base));
     expect((await request('/healthz')).status).toBe(200);
-    expect(await (await request('/readyz?probe=1')).json()).toMatchObject({
+    // Provider probes fan out upstream and expose error details: admin token required.
+    expect((await request('/readyz?probe=1')).status).toBe(401);
+    expect(
+      await (
+        await request('/readyz?probe=1', undefined, { authorization: `Bearer ${ADMIN}` })
+      ).json(),
+    ).toMatchObject({
       status: 'ready',
       providers: { mock: { ok: true } },
     });
+    expect((await request('/readyz')).status).toBe(200);
     gateway.setDraining(true);
     expect((await request('/readyz')).status).toBe(503);
   });

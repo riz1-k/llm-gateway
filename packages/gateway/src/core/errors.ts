@@ -246,6 +246,14 @@ export function toGatewayError(err: unknown): GatewayError {
         });
       case 'aborted':
         return new GatewayError(499, 'request_aborted', err.message, { cause: err });
+      case 'upstream_auth':
+        // Upstream auth errors can echo (masked) provider credentials; keep them in the logs.
+        return new GatewayError(
+          502,
+          'upstream_error',
+          `${err.provider}: upstream rejected the gateway's credentials`,
+          { cause: err, type: 'upstream_error' },
+        );
       default:
         return new GatewayError(502, 'upstream_error', err.message, {
           cause: err,
@@ -253,8 +261,9 @@ export function toGatewayError(err: unknown): GatewayError {
         });
     }
   }
-  const message = err instanceof Error ? err.message : String(err);
-  return new GatewayError(500, 'internal_error', `Internal error: ${message}`, {
+  // Unexpected errors (e.g. a Redis/Postgres failure) may name internal hosts: the message stays in
+  // the logs (`cause`), clients get a generic one.
+  return new GatewayError(500, 'internal_error', 'Internal server error', {
     cause: err,
     type: 'api_error',
   });

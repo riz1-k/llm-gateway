@@ -9,7 +9,7 @@ import type { Logger } from '../observability/logger.js';
 import { noopMetrics, type GatewayMetrics } from '../observability/metrics.js';
 import type { InvalidationBus } from '../platform/invalidation.js';
 import type { RedisKeys } from '../platform/redis.js';
-import { hashKey, StaticKeyStore } from './keys.js';
+import { hashKey, isGeneratedKeyFormat, StaticKeyStore } from './keys.js';
 
 /** Key record as cached (JSON-serializable). */
 interface CachedKey {
@@ -107,6 +107,13 @@ export class PlatformKeyStore implements KeyStore {
       const value: CachedKey = { rec, expiresAt: null };
       this.remember(hash, value, now);
       return rec;
+    }
+
+    // Database keys are always `sk-sy-` + 40 base62 (generateApiKey). Anything else cannot match,
+    // so unauthenticated garbage never costs a Redis round trip, a negative-cache entry or a query.
+    if (!isGeneratedKeyFormat(token)) {
+      this.remember(hash, null, now);
+      return null;
     }
 
     let value: CachedKey | null | undefined = await this.fromRedis(hash);

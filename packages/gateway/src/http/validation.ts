@@ -124,7 +124,8 @@ export const embeddingRequestSchema = z.looseObject({
     z.array(z.array(z.number().int()).min(1)).min(1),
   ]),
   encoding_format: z.enum(['float', 'base64']).optional(),
-  dimensions: z.number().int().positive().optional(),
+  // Bounded: some upstreams (and the mock) allocate `dimensions`-sized vectors per input.
+  dimensions: z.number().int().positive().max(16_384).optional(),
   user: z.string().optional(),
   input_type: z.enum(['query', 'document']).optional(),
   input_titles: z.array(z.string().nullable()).optional(),

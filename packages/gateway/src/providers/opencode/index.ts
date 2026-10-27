@@ -25,6 +25,7 @@ import { AsyncQueue } from '../../util/async-queue.js';
 import type { AdapterDeps, AttemptContext, ProviderAdapter, ProviderHealth } from '../base.js';
 import {
   OpencodeClient,
+  OPENCODE_DISABLED_TOOLS,
   mapOpencodeError,
   type OpencodeMessageResult,
   type PromptBody,
@@ -255,6 +256,7 @@ export class OpencodeAdapter implements ProviderAdapter {
         model: { providerID: this.config.upstream_provider, modelID: target.upstreamModel },
         ...(system ? { system } : {}),
         ...(variant ? { variant } : {}),
+        tools: { ...OPENCODE_DISABLED_TOOLS },
         parts: transcript.parts,
       },
       tools: toolsActive ? req.tools : undefined,

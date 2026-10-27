@@ -79,6 +79,8 @@ export interface RunningMockServer {
 }
 
 const MAX_RECENT = 50;
+/** Upper bound for a client-requested `dimensions` (vectors are allocated per input). */
+const MAX_EMBEDDING_DIM = 8192;
 const MOCK_MODELS = [
   'mock-echo',
   'mock-fixed',
@@ -299,7 +301,7 @@ export function createMockApp(opts: MockServerOptions = {}): MockApp {
     if (!texts) throw new BadRequest('input must be a string or an array of strings');
     const dim =
       typeof body.dimensions === 'number' && body.dimensions > 0
-        ? Math.trunc(body.dimensions)
+        ? Math.min(Math.trunc(body.dimensions), MAX_EMBEDDING_DIM)
         : embeddingDim;
     const base64 = body.encoding_format === 'base64';
     const vectors = mockEmbeddings(texts, dim);

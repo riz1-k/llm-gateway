@@ -26,8 +26,8 @@ export function generateApiKey(): string {
   return out;
 }
 
-export const isGeneratedKeyFormat = (key: string): boolean =>
-  new RegExp(`^${API_KEY_PREFIX}[0-9A-Za-z]{${API_KEY_RANDOM_CHARS}}$`).test(key);
+const GENERATED_KEY = new RegExp(`^${API_KEY_PREFIX}[0-9A-Za-z]{${API_KEY_RANDOM_CHARS}}$`);
+export const isGeneratedKeyFormat = (key: string): boolean => GENERATED_KEY.test(key);
 
 /** Extracts the presented credential from `Authorization: Bearer …` or `x-api-key`. */
 export function extractBearer(headers: Headers): string | undefined {

@@ -86,11 +86,11 @@ describe('DB-backed virtual keys', () => {
   });
 
   it('rejects unknown and expired keys (negative cache)', async () => {
-    expect((await chat(a, 'sk-sy-doesnotexist000000000000000000000000000000')).status).toBe(401);
+    expect((await chat(a, 'sk-sy-doesnotexist0000000000000000000000000000')).status).toBe(401);
     await waitFor(
       async () =>
         (await a.redis.get(
-          `${a.ns.prefix}key:${hashKey('sk-sy-doesnotexist000000000000000000000000000000')}`,
+          `${a.ns.prefix}key:${hashKey('sk-sy-doesnotexist0000000000000000000000000000')}`,
         )) === '-',
     );
     const { key } = await a.platform.admin!.createKey('test', 'alpha', {
@@ -129,10 +129,19 @@ describe('DB-backed virtual keys', () => {
       logger: silentLogger(),
     });
     await expect(
-      store.verify('sk-sy-whatever0000000000000000000000000000000000'),
+      store.verify('sk-sy-whatever00000000000000000000000000000000'),
     ).rejects.toMatchObject({ status: 503 });
     expect(await store.verify(KEY)).toMatchObject({ source: 'static' }); // static keys still work
+    // Malformed credentials can never be DB keys: rejected without touching Postgres (SR-08).
+    expect(await store.verify('not-a-key')).toBeNull();
+    expect(await store.verify('sk-sy-short')).toBeNull();
     await store.close();
     await broken.close();
+  });
+
+  it('does not cache or look up malformed keys (SR-08)', async () => {
+    const bogus = `sk-sy-${'x'.repeat(41)}`;
+    expect((await chat(a, bogus)).status).toBe(401);
+    expect(await a.redis.get(`${a.ns.prefix}key:${hashKey(bogus)}`)).toBeNull();
   });
 });

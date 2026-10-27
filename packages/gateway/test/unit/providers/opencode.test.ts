@@ -131,6 +131,22 @@ describe('OpencodeAdapter.chat', () => {
     expect(fake.openSessions).toEqual([]);
   });
 
+  it('disables every opencode tool on each prompt (defense in depth, SR-06)', async () => {
+    const { fake, adapter, target } = setup();
+    fake.replies.push({ text: 'ok' });
+    await adapter.chat(req(), target, attemptContext());
+    expect(fake.prompts[0]!.body.tools).toMatchObject({
+      '*': false,
+      bash: false,
+      edit: false,
+      write: false,
+      webfetch: false,
+      task: false,
+    });
+    const tools = fake.prompts[0]!.body.tools as Record<string, boolean>;
+    expect(Object.values(tools).every((v) => v === false)).toBe(true);
+  });
+
   it('returns reasoning only when metadata.include_reasoning is set', async () => {
     const { fake, adapter, target } = setup();
     fake.replies.push({ text: 'A', reasoning: 'thinking…' }, { text: 'B', reasoning: 'thinking…' });

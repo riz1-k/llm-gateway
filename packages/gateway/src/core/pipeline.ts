@@ -12,7 +12,12 @@ import {
   rerankCacheKey,
 } from '../cache/keys.js';
 import { semanticQuery } from '../cache/semantic.js';
-import { countTokens, estimatePromptTokens, estimateTextTokens } from '../limits/estimate.js';
+import {
+  countTokens,
+  estimatePromptTokens,
+  estimateTextTokens,
+  newTokenBudget,
+} from '../limits/estimate.js';
 import { noopMetrics, type GatewayMetrics } from '../observability/metrics.js';
 import { computeCost, estimateCost, formatUsd } from '../usage/pricing.js';
 import { encodeSSE, SSE_DONE } from '../util/sse.js';
@@ -56,6 +61,8 @@ import type {
 
 export interface RequestContext {
   requestId: string;
+  /** Unique id of the usage event (defaults to `requestId`; differs when the client chose it). */
+  usageId?: string;
   startedAt: number;
   logger: Logger;
   headers: Headers;
@@ -333,7 +340,7 @@ export class Pipeline {
     const latency = this.clock() - rctx.startedAt;
     const event: UsageEvent = {
       ts: new Date(rctx.startedAt).toISOString(),
-      request_id: rctx.requestId,
+      request_id: rctx.usageId ?? rctx.requestId,
       team_id: rctx.key.team.id,
       team: rctx.key.team.slug,
       key_id: rctx.key.id,
@@ -417,6 +424,13 @@ export class Pipeline {
     const gerr = toGatewayError(err);
     o.status = gerr.status;
     o.errorCode = gerr.code;
+    if (gerr.status >= 500 && gerr !== err) {
+      // The client-facing message may be generic; keep the original for operators.
+      rctx.logger.warn(
+        { code: gerr.code, err: err instanceof Error ? err.message : String(err) },
+        'request failed',
+      );
+    }
     if (route) {
       await this.account(rctx, route, kind, o, admission);
       Object.assign(gerr.headers, {
@@ -612,8 +626,9 @@ export class Pipeline {
     let admission: Admission | undefined;
     try {
       const promptTokens = estimatePromptTokens(req);
+      // `n` choices each generate up to the completion limit.
       const maxCompletion =
-        req.max_completion_tokens ?? req.max_tokens ?? DEFAULT_COMPLETION_ESTIMATE;
+        (req.max_completion_tokens ?? req.max_tokens ?? DEFAULT_COMPLETION_ESTIMATE) * (req.n ?? 1);
       admission = await this.admit(rctx, route, promptTokens, maxCompletion);
 
       const cacheKey = cacheable ? chatCacheKey(route, rctx.key.team.slug, req) : undefined;
@@ -919,7 +934,8 @@ export class Pipeline {
         );
       }
       // Split the upstream cost/tokens over items proportionally to their estimated size.
-      const est = missIdx.map((i) => Math.max(1, countTokens(texts[i]!)));
+      const budget = newTokenBudget();
+      const est = missIdx.map((i) => Math.max(1, countTokens(texts[i]!, budget)));
       const estSum = est.reduce((a, b) => a + b, 0);
       const ttl = route.cache?.exact?.ttl_s ?? 0;
       const writes: { key: string; entry: CacheEntry; ttlSeconds: number }[] = [];

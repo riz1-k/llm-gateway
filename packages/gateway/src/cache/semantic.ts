@@ -4,7 +4,7 @@ import type { ChatRequest } from '../core/types.js';
 import { contentToText } from '../limits/estimate.js';
 import type { Logger } from '../observability/logger.js';
 import { deleteByPattern, type RedisKeys } from '../platform/redis.js';
-import { canonicalJSON } from './keys.js';
+import { canonicalJSON, chatKeyMaterial } from './keys.js';
 
 export interface SemanticMatch {
   /** Element id = exact-cache key of the stored response. */
@@ -31,9 +31,10 @@ const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex
 
 /**
  * What a semantic lookup is about: the embedded text (the last user message) and a scope hash
- * covering everything else that changes the answer — system/developer prompts, earlier turns,
- * response_format and generation settings. Only requests whose scope matches exactly can share a
- * semantically-similar answer. Returns null when the request is not eligible (tools, no user text).
+ * covering everything else that changes the answer — system/developer prompts, earlier turns
+ * and every response-affecting request field (same rules as the exact-cache key). Only requests
+ * whose scope matches exactly can share a semantically-similar answer. Returns null when the
+ * request is not eligible (tools, no user text).
  */
 export function semanticQuery(req: ChatRequest): { text: string; scope: string } | null {
   if (req.tools?.length) return null;
@@ -46,10 +47,7 @@ export function semanticQuery(req: ChatRequest): { text: string; scope: string }
   const scope = sha256(
     canonicalJSON({
       context: msgs.slice(0, -1),
-      response_format: req.response_format,
-      max_tokens: req.max_completion_tokens ?? req.max_tokens,
-      stop: req.stop,
-      reasoning_effort: req.reasoning_effort,
+      ...chatKeyMaterial(req, { withoutMessages: true }),
     }),
   ).slice(0, 24);
   return { text, scope };

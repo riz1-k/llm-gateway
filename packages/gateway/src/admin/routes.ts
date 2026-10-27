@@ -52,9 +52,13 @@ function parse<S extends z.ZodType>(schema: S, raw: unknown): z.infer<S> {
   return r.data;
 }
 
-const SECRET_KEY = /(password|secret|token|api_key|apikey)$/i;
+const SECRET_KEY = /(password|secret|token|api[_-]?key|authorization|cookie|webhook(_url)?)$/i;
 
-/** Config with credentials removed (URLs lose their password; secrets become "[redacted]"). */
+/**
+ * Config with credentials removed (URLs lose their password; secrets become "[redacted]").
+ * Upstream `headers` values are always redacted (they typically carry auth), and webhook URLs
+ * too (Slack-style webhooks embed their secret in the path).
+ */
 export function redactConfig(value: unknown, keyName = ''): unknown {
   if (Array.isArray(value)) return value.map((v) => redactConfig(v, keyName));
   if (value && typeof value === 'object') {
@@ -62,6 +66,10 @@ export function redactConfig(value: unknown, keyName = ''): unknown {
     for (const [k, v] of Object.entries(value)) {
       if (k === 'key' && typeof v === 'string') out[k] = `${v.slice(0, 12)}…`;
       else if (SECRET_KEY.test(k) && typeof v === 'string' && v) out[k] = '[redacted]';
+      else if (k === 'headers' && v && typeof v === 'object' && !Array.isArray(v))
+        out[k] = Object.fromEntries(
+          Object.keys(v as Record<string, unknown>).map((h) => [h, '[redacted]']),
+        );
       else out[k] = redactConfig(v, k);
     }
     return out;

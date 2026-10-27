@@ -28,10 +28,13 @@ import type {
 } from '../core/types.js';
 import { mockFaultSchema, type MockFault, type MockProviderConfig } from '../config/schema.js';
 import type { ResolvedModel } from '../config/resolve.js';
-import { countTokens, estimatePromptTokens } from '../limits/estimate.js';
+import { countTokens, estimatePromptTokens, estimateTextTokens } from '../limits/estimate.js';
 import { sleep } from '../util/abort.js';
 import type { AdapterDeps, AttemptContext, ProviderAdapter, ProviderHealth } from './base.js';
 import { mapFetchError } from './http.js';
+
+/** Same ceiling as `embedding_dim` in the config schema. */
+const MAX_MOCK_EMBEDDING_DIM = 8192;
 
 /**
  * In-process deterministic provider (tests, CI offline tier, chaos demos). Behavior is selected
@@ -154,9 +157,10 @@ export class MockAdapter implements ProviderAdapter {
         provider: this.name,
       });
     }
-    const dim = req.dimensions ?? this.config.embedding_dim;
+    // Client-chosen `dimensions` must not size allocations beyond the configured maximum.
+    const dim = Math.min(req.dimensions ?? this.config.embedding_dim, MAX_MOCK_EMBEDDING_DIM);
     const vectors = mockEmbeddings(texts, dim);
-    const tokens = texts.reduce((acc, t) => acc + countTokens(t), 0);
+    const tokens = estimateTextTokens(texts);
     return {
       object: 'list',
       data: vectors.map((v, index) => ({
@@ -181,8 +185,7 @@ export class MockAdapter implements ProviderAdapter {
       ...(req.return_documents ? { document: { text: req.documents[r.index] ?? '' } } : {}),
     }));
     const tokens =
-      countTokens(req.query) * req.documents.length +
-      req.documents.reduce((acc, d) => acc + countTokens(d), 0);
+      countTokens(req.query) * req.documents.length + estimateTextTokens(req.documents);
     return {
       id: newRerankId(),
       model: target.upstreamModel,
