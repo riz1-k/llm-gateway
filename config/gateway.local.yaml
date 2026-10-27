@@ -1,0 +1,187 @@
+# Switchyard — local development config for this machine (devenv).
+#   opencode bridge  :4096  (GitHub Copilot models; creds from devenv/.env)
+#   llama.cpp        :8081 chat (optional) · :8082 embeddings · :8083 rerank
+# Start: scripts/dev.sh  (sources devenv/.env, serves on :8787)
+# Route names are a cross-project contract (PLAN.md §3.2) — do not rename.
+
+server:
+  port: ${PORT:-8787}
+  host: ${HOST:-127.0.0.1}
+  request_timeout_ms: 300000
+  body_limit_mb: 10
+  shutdown_grace_ms: 15000
+
+redis: { url: '${REDIS_URL:-redis://localhost:6379/0}', key_prefix: 'sy:' }
+database: { url: '${DATABASE_URL:-postgres://dev:dev@localhost:5432/llmgateway}' }
+
+auth:
+  admin_token: ${SWITCHYARD_ADMIN_TOKEN:-sk-sy-dev-admin}
+  static_keys:
+    - key: ${DOCSQA_GATEWAY_KEY:-sk-sy-dev-docsqa}
+      team: docsqa
+      name: docsqa-dev
+      allowed_routes:
+        [
+          docsqa-chat,
+          docsqa-fast,
+          docsqa-judge,
+          docsqa-embed,
+          docsqa-rerank,
+          mock-chat,
+          mock-embed,
+          mock-rerank,
+          mock-tools,
+        ]
+    - key: ${OPSAGENT_GATEWAY_KEY:-sk-sy-dev-opsagent}
+      team: opsagent
+      name: opsagent-dev
+      allowed_routes:
+        [opsagent-chat, opsagent-judge, mock-chat, mock-embed, mock-rerank, mock-tools]
+    - key: ${EVALS_GATEWAY_KEY:-sk-sy-dev-evals}
+      team: evals
+      name: evals-dev # all routes
+
+pricing_file: ./pricing.json
+
+retry: { attempts: 2, backoff_ms: 250, max_backoff_ms: 4000, max_retry_after_ms: 20000 }
+breaker:
+  {
+    window_s: 30,
+    min_requests: 10,
+    failure_rate: 0.5,
+    consecutive_failures: 5,
+    cooldown_s: 30,
+    max_cooldown_s: 300,
+  }
+
+providers:
+  copilot:
+    type: opencode
+    base_url: http://127.0.0.1:4096
+    username: ${OPENCODE_SERVER_USERNAME:-opencode}
+    password: ${OPENCODE_SERVER_PASSWORD:-}
+    agent: gateway
+    upstream_provider: github-copilot
+    max_concurrency: 4
+    queue_timeout_ms: 60000
+    timeout_ms: 180000
+    streaming: events
+    repair_attempts: 1
+  local:
+    type: openai-compatible
+    base_url: http://127.0.0.1:8081/v1 # per-model override below (llama.cpp serves one model per port)
+    timeout_ms: 120000
+    max_concurrency: 4
+  openai:
+    type: openai
+    api_key: ${OPENAI_API_KEY:-}
+    enabled_if_key: true
+  anthropic:
+    type: anthropic
+    api_key: ${ANTHROPIC_API_KEY:-}
+    enabled_if_key: true
+  mock:
+    type: mock
+    allow_header_faults: true # dev only: x-mock-* headers inject latency/failures
+    embedding_dim: 256
+
+models:
+  copilot-sonnet: { provider: copilot, model: claude-sonnet-5.5, context_window: 200000 }
+  copilot-haiku: { provider: copilot, model: claude-haiku-4.5, context_window: 200000 }
+  copilot-gpt: { provider: copilot, model: gpt-5.6-terra }
+  local-qwen:
+    provider: local
+    model: qwen3.5-2b
+    timeout_ms: 60000
+    # Qwen3.5 is a thinking model: without this, short max_tokens budgets end up as empty content.
+    params: { chat_template_kwargs: { enable_thinking: false } }
+  local-embeddinggemma:
+    provider: local
+    base_url: http://127.0.0.1:8082/v1
+    model: embeddinggemma-300m
+    kind: embedding
+    input_templates:
+      query: 'task: search result | query: {text}'
+      document: 'title: {title} | text: {text}' # {title} from optional input_titles[], default "none"
+  local-jina-rerank:
+    provider: local
+    base_url: http://127.0.0.1:8083/v1
+    model: jina-reranker-v1-tiny-en.f16
+    kind: rerank
+  mock-extractive: { provider: mock, model: mock-extractive }
+  mock-scripted: { provider: mock, model: mock-tools }
+  mock-echo: { provider: mock, model: mock-echo }
+  mock-embedder:
+    {
+      provider: mock,
+      model: mock-embed,
+      kind: embedding,
+      input_templates: { query: 'query: {text}', document: 'passage: {text}' },
+    }
+  mock-reranker: { provider: mock, model: mock-rerank, kind: rerank }
+  mock-down:
+    {
+      provider: mock,
+      model: mock-echo,
+      options: { fault: { status: 503 } },
+      description: 'always 503 (fallback demo)',
+    }
+
+routes:
+  docsqa-chat:
+    description: DocsQA answer generation (Copilot Sonnet → local Qwen)
+    targets: [copilot-sonnet, local-qwen]
+    retry: { attempts: 2, backoff_ms: 250, max_backoff_ms: 4000 }
+    timeout_ms: 180000
+    cache: { exact: { ttl_s: 86400 } }
+  docsqa-fast:
+    description: Query rewriting / cheap tasks (Copilot Haiku → Sonnet)
+    targets: [copilot-haiku, copilot-sonnet]
+    timeout_ms: 120000
+    cache: { exact: { ttl_s: 86400 } }
+  docsqa-judge:
+    description: Eval judge (Sonnet, reasoning medium)
+    targets: [copilot-sonnet]
+    defaults: { reasoning_effort: medium }
+    timeout_ms: 240000
+    cache: { exact: { ttl_s: 604800 } }
+  docsqa-embed:
+    description: embeddinggemma-300m (768-d); use input_type query|document
+    targets: [local-embeddinggemma]
+    timeout_ms: 120000
+    cache: { exact: { ttl_s: 2592000 } }
+  docsqa-rerank:
+    description: jina-reranker-v1-tiny-en cross-encoder
+    targets: [local-jina-rerank]
+    timeout_ms: 60000
+  opsagent-chat:
+    description: OpsAgent tool-calling chat (Sonnet → GPT-5.6 Terra → local Qwen)
+    targets: [copilot-sonnet, copilot-gpt, local-qwen]
+    timeout_ms: 240000
+    cache: { exact: { ttl_s: 3600 } }
+  opsagent-judge:
+    description: OpsAgent eval judge (Sonnet, reasoning medium)
+    targets: [copilot-sonnet]
+    defaults: { reasoning_effort: medium }
+    timeout_ms: 240000
+    cache: { exact: { ttl_s: 604800 } }
+  mock-chat:
+    {
+      description: 'Deterministic RAG-aware mock (citations / NO_ANSWER)',
+      targets: [mock-extractive],
+    }
+  mock-embed: { description: 'Deterministic hashed embeddings (256-d)', targets: [mock-embedder] }
+  mock-rerank: { description: 'Deterministic lexical rerank', targets: [mock-reranker] }
+  mock-tools:
+    { description: 'Scripted tool calls (metadata.mock_script)', targets: [mock-scripted] }
+  demo-fallback:
+    description: 'Fallback demo: always-503 mock → local Qwen (start :8081 first)'
+    targets: [mock-down, local-qwen]
+    retry: { attempts: 1 }
+    hidden: true
+
+limits:
+  defaults: { key: { rpm: 600, tpm: 2000000 }, team: { rpm: 1200, tpm: 5000000 } }
+budgets: { enforcement: hard, soft_threshold: 0.8, alert_webhook: null }
+usage: { stream: 'sy:usage', batch_size: 500, flush_interval_ms: 1000, retention_days: 400 }
+observability: { log_level: '${LOG_LEVEL:-info}', log_bodies: false, metrics: true }

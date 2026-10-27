@@ -1,0 +1,142 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Switchyard gateway configuration — documented example.
+#
+# Interpolation: every string value supports ${VAR} (error if unset), ${VAR:-default} (default
+# if unset or empty) and ${VAR-default} (default only if unset). Write $${ for a literal "${".
+# Validate with:  switchyard validate-config config/gateway.example.yaml
+# Reload live with SIGHUP or `POST /admin/config/reload` (admin token): providers, models and
+# routes swap atomically; in-flight requests finish on the previous snapshot.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+
+server:
+  port: ${PORT:-8787}
+  host: 0.0.0.0
+  request_timeout_ms: 300000 # default route deadline (route.timeout_ms overrides)
+  body_limit_mb: 10
+  shutdown_grace_ms: 15000 # SIGTERM: stop accepting, drain in-flight up to this long
+
+# Parsed now, used by the platform subsystems (keys/teams, cache, rate limits, budgets, usage).
+redis: { url: '${REDIS_URL:-redis://localhost:6379/0}', key_prefix: 'sy:' }
+database: { url: '${DATABASE_URL:-postgres://dev:dev@localhost:5432/llmgateway}' }
+
+auth:
+  admin_token: ${SWITCHYARD_ADMIN_TOKEN:-} # Bearer token for /admin/*; empty disables admin
+  static_keys: # bootstrap keys (dev/CI); empty keys are skipped
+    - key: ${APP_GATEWAY_KEY:-}
+      team: my-team
+      name: bootstrap
+      # allowed_routes: [chat, embed]          # omit = all routes
+      # allow_direct_models: false             # true = may call `models:` entries by name
+      # rpm: 600                               # per-key overrides (enforced by the rate limiter)
+      # tpm: 2000000
+
+pricing_file: ./pricing.json # USD per 1M tokens; per-model `pricing:` overrides it
+
+retry: # defaults for routes without their own `retry`
+  attempts: 2 # total attempts per target (1 = no retry)
+  backoff_ms: 250 # exponential backoff with full jitter …
+  max_backoff_ms: 4000 # … capped here
+  max_retry_after_ms: 20000 # honor upstream Retry-After up to this; longer → fall back
+
+breaker: # per-target circuit breaker
+  window_s: 30 # rolling window
+  min_requests: 10 # minimum samples before the failure rate counts
+  failure_rate: 0.5 # open at ≥ 50 % failures …
+  consecutive_failures: 5 # … or after 5 failures in a row
+  cooldown_s: 30 # open duration, doubling per consecutive trip …
+  max_cooldown_s: 300 # … up to this; then one half-open probe
+
+providers:
+  copilot: # opencode bridge → GitHub Copilot models (tool calling + JSON mode emulated)
+    type: opencode
+    base_url: http://127.0.0.1:4096
+    username: ${OPENCODE_SERVER_USERNAME:-opencode}
+    password: ${OPENCODE_SERVER_PASSWORD:-}
+    agent: gateway # opencode agent with all built-in tools disabled
+    upstream_provider: github-copilot
+    max_concurrency: 4 # semaphore; waiting longer than queue_timeout_ms → upstream_busy
+    queue_timeout_ms: 60000
+    timeout_ms: 180000 # per attempt
+    streaming: events # events = real streaming via opencode /event; synthetic = await + chunk
+    repair_attempts: 1 # repair round-trips for invalid emulated tool calls / JSON
+  local: # any OpenAI-compatible server (llama.cpp, vLLM, Ollama, Groq, …)
+    type: openai-compatible
+    base_url: http://127.0.0.1:8081/v1
+    # api_key: ${LOCAL_API_KEY:-}
+    supports_tools: true
+    supports_stream_usage: true
+  openai:
+    type: openai
+    api_key: ${OPENAI_API_KEY:-}
+    enabled_if_key: true # provider (and its models) disabled when the key is empty
+  anthropic:
+    type: anthropic
+    api_key: ${ANTHROPIC_API_KEY:-}
+    enabled_if_key: true
+    default_max_tokens: 4096 # Anthropic requires max_tokens
+    json_mode: tool # json_schema via a forced tool (or `prompt`)
+  mock:
+    type: mock # deterministic upstream for tests / CI / chaos demos
+    allow_header_faults: false # true = honor x-mock-* fault-injection headers (never in prod)
+
+models: # concrete upstream models ("targets")
+  copilot-sonnet: { provider: copilot, model: claude-sonnet-5.5 }
+  copilot-haiku: { provider: copilot, model: claude-haiku-4.5 }
+  local-qwen: { provider: local, model: qwen3.5-2b }
+  local-embed:
+    provider: local
+    base_url: http://127.0.0.1:8082/v1 # per-model base URL override
+    model: embeddinggemma-300m
+    kind: embedding # chat | embedding | rerank
+    input_templates: # selected by the request's `input_type`
+      query: 'task: search result | query: {text}'
+      document: 'title: {title} | text: {text}' # {title} ← input_titles[i] or "none"
+  local-rerank:
+    provider: local
+    base_url: http://127.0.0.1:8083/v1
+    model: jina-reranker-v1-tiny-en.f16
+    kind: rerank
+  gpt:
+    provider: openai
+    model: gpt-5.6-terra
+    pricing: { input: 1.25, output: 10.0, cached_input: 0.125 } # overrides pricing.json
+  claude:
+    provider: anthropic
+    model: claude-sonnet-5-5
+    timeout_ms: 120000
+  mock-rag: { provider: mock, model: mock-extractive }
+
+routes: # virtual models — the only names clients use
+  chat:
+    description: General chat with ordered fallback
+    targets: [copilot-sonnet, gpt, claude, local-qwen] # disabled targets are skipped
+    strategy: fallback # fallback | weighted | least-latency
+    retry: { attempts: 2, backoff_ms: 250, max_backoff_ms: 4000 }
+    timeout_ms: 120000 # total deadline across retries + fallbacks
+    cache: { exact: { ttl_s: 86400 }, semantic: { enabled: false } }
+    defaults: { reasoning_effort: null } # applied when the request omits the field
+  judge:
+    targets: [copilot-sonnet]
+    defaults: { reasoning_effort: medium, max_tokens: 2048 }
+  balanced:
+    description: Weighted split (smooth weighted round-robin)
+    strategy: weighted
+    targets:
+      - { model: copilot-sonnet, weight: 3 }
+      - { model: copilot-haiku, weight: 1, timeout_ms: 30000 }
+  fastest:
+    strategy: least-latency # EWMA latency, ε-greedy exploration
+    targets: [copilot-haiku, local-qwen]
+  embed: { targets: [local-embed], cache: { exact: { ttl_s: 2592000 } } }
+  rerank: { targets: [local-rerank] }
+  rag-mock: { targets: [mock-rag], hidden: true } # hidden = callable but not in /v1/models
+
+# Enforced by the platform release (parsed and validated today).
+limits:
+  defaults: { key: { rpm: 600, tpm: 2000000 }, team: { rpm: 1200, tpm: 5000000 } }
+budgets: { enforcement: hard, soft_threshold: 0.8, alert_webhook: null }
+usage: { stream: 'sy:usage', batch_size: 500, flush_interval_ms: 1000, retention_days: 400 }
+observability:
+  log_level: info # fatal | error | warn | info | debug | trace | silent
+  log_bodies: false # prompts/completions are never logged unless enabled
+  metrics: true
