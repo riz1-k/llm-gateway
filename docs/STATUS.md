@@ -631,8 +631,9 @@ See [Release (wave M)](#release-wave-m). Follow-ups for later waves:
 
 ## Cross-project (O) — paused
 
-Paused 2026-10-27 ~16:25 IST on the user's request (stop at the next safe point). Nothing is committed;
-everything below is in the working trees of the three repos and passes their checks.
+Paused 2026-10-27 ~16:25 IST on the user's request (stop at the next safe point). Everything below was
+verified by the orchestrator (checks + leakscan) and committed: llm-gateway 1df5bf9, docsqa 5db0807,
+opsagent fc10a46.
 
 ### Done (brief O scope numbers)
 
@@ -695,7 +696,7 @@ usage_events where provider='copilot' and cache='miss' and ts > '2026-10-27 15:0
 - **9** STATUS entries in docsqa and opsagent (change lists below).
 - `usage_daily` is maintained by the in-process writer (`usage.in_process_writer: true`): no worker needed.
 
-### Changes per repo (uncommitted)
+### Changes per repo (commits 1df5bf9 / 5db0807 / fc10a46)
 
 - **llm-gateway**: `scripts/seed-portfolio.sh` (new), `deploy/docker/docker-compose.observe-host.yml` (new),
   `observability/prometheus/prometheus.observe-host.yml` (new), `observability/grafana/provisioning/datasources/datasources.yml`
