@@ -1,6 +1,7 @@
 # Switchyard status
 
-_Last updated: 2026-10-27, after the platform build (wave H). The core was built in wave G._
+_Last updated: 2026-10-27, after the infra wave (K: image, compose, Helm, Terraform, dashboards,
+CI). The platform was built in wave H, the core in wave G._
 
 ## What exists
 
@@ -35,7 +36,7 @@ Without them, it falls back to the in-memory core implementations.
 | Admin API     | SPEC §12 under `/admin`: teams CRUD, keys create/list/revoke/rotate, budgets, budget status, usage reports, cache purge, audit log, redacted config; every mutation audit-logged in the same transaction                                                                                         | `src/admin/`                            |
 | Metrics       | `PromMetrics` (all SPEC §13 names + extras), `/metrics` on the API port or `metrics.port`; worker metrics on `--port`                                                                                                                                                                            | `src/observability/metrics.ts`          |
 | Dev tooling   | `Makefile`, `scripts/dev.sh`, `scripts/smoke_openai_sdk.py`, `.env.example`                                                                                                                                                                                                                      | root                                    |
-| Docs          | `README.md`, `docs/ADMIN.md`, `docs/METRICS.md`, `docs/opencode-bridge.md`, this file                                                                                                                                                                                                            |                                         |
+| Docs          | `README.md`, `docs/ADMIN.md`, `docs/METRICS.md`, `docs/DEPLOYMENT.md`, `docs/OBSERVABILITY.md`, `docs/opencode-bridge.md`, this file                                                                                                                                                             |                                         |
 
 ## How to run
 
@@ -158,10 +159,156 @@ Live verification against the running gateway (curl + the Python `openai` SDK vi
 
 Total real Copilot calls during the build: 10.
 
+## Infrastructure (wave K)
+
+Deployment and observability are built and verified end to end. See
+[DEPLOYMENT.md](DEPLOYMENT.md) and [OBSERVABILITY.md](OBSERVABILITY.md).
+
+| Area         | What                                                                                                                                                                                                                                                                                    | Where                                           |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| Image        | Multi-stage pnpm build → distroless `nodejs24-debian13:nonroot` (uid 65532). Bases pinned by digest, OCI labels, allow-list `.dockerignore`. **188.2 MB** uncompressed (≈ 65 MB compressed); CI enforces < 200 MB                                                                       | `deploy/docker/Dockerfile`, `.dockerignore`     |
+| Compose      | gateway, worker, migrate, mock-provider, Redis 8.8.4, Postgres 18.6, Prometheus 3.15.1, Grafana 13.2.4 (+ `seed` in profile demo). Healthchecks, `depends_on` conditions, memory limits (≈ 2.2 GB total), read-only containers. Host ports 8797/55432/56379/9091/3301 on 127.0.0.1 only | `deploy/docker/`, `config/gateway.compose.yaml` |
+| Demo traffic | Dependency-free `deploy/demo/traffic.mjs`. Uses the admin API to create 3 teams + a $0.002 sandbox team and an RPM-5 key, then sends weighted chat/stream/embed/rerank/tools traffic. Exits 1 unless cache hits, fallbacks, 429s and 402s were all observed                             | `deploy/demo/`                                  |
+| Dashboards   | Overview (22 panels), Cost & Budgets (20), Providers & Reliability (20). schemaVersion 42, `datasource`/`pgds`/`team`/`route` variables, Prometheus + Postgres queries, generated from code                                                                                             | `observability/grafana/`                        |
+| Alerts       | 3 recording rules + 8 alerts (error rate, p95, breaker open, budget > 90 % / exhausted, stream lag, dropped events, fail-open), runbook links, promtool unit tests                                                                                                                      | `observability/prometheus/`                     |
+| Helm         | API + worker Deployments, migration hook Job, Services, Ingress, ConfigMap, Secret / existingSecret, HPA, PDB, ServiceMonitor, PrometheusRule, `helm test`, probes, restricted securityContext, topology spread, `values.schema.json`, NOTES, README values table                       | `deploy/helm/switchyard/`                       |
+| Terraform    | Modules `switchyard`, `redis`, `postgres`, `observability` (kube-prometheus-stack 92.14.0 + dashboard ConfigMaps). `envs/local-kind` (tehcyx/kind, port mappings, image build + `kind load`, mock provider, metrics-server, seed Job). `envs/aws-eks-example` (validate only)           | `deploy/terraform/`                             |
+| CI           | `ci.yml`: node (lint/typecheck/build/test with Postgres + Redis services), security (`pnpm audit --prod --audit-level=high`, gitleaks 8.30.1 over full history), infra lint, image build + smoke + size budget. `docker.yml`: multi-arch GHCR push, SBOM, provenance, attestation       | `.github/workflows/`                            |
+| Tooling      | `make tools` downloads pinned, checksum-verified promtool 3.15.1, kubeconform 0.8.0, actionlint 1.7.12, tflint 0.65.0, gitleaks 8.30.1. `make lint-infra`, `lint-secrets`, `audit`, `compose-*`, `k8s-*`, `screenshots`                                                                 | `Makefile`, `deploy/scripts/install-tools.sh`   |
+
+CI hardening:
+
+- Workflow-level `permissions: contents: read`. Only the push job in `docker.yml` gets
+  `packages: write`, `id-token: write` and `attestations: write`.
+- No `pull_request_target`. Every action is pinned by commit SHA.
+- `persist-credentials: false` on checkouts.
+
+### Verification (2026-10-27)
+
+Compose and kind were run one after the other, never at the same time, each under the shared
+heavy-docker lock and torn down afterwards.
+
+**Compose** (`make compose-up` → `make compose-demo` → `make compose-down`):
+
+- **Startup:** all services healthy on the first `up --wait`. `migrate` logged "1 applied", and
+  `seed` created docsqa/opsagent/evals without printing keys.
+- **Demo traffic:**
+
+  | Run   | Requests | Cache hits | Fallbacks | Streams | 429 | 402 | 5xx |
+  | ----- | -------- | ---------- | --------- | ------- | --- | --- | --- |
+  | 150 s | 1997     | 1269       | 228       | 175     | 39  | 82  | 0   |
+  | 90 s  | 1253     | 898        | 149       | n/a     | 32  | 53  | 0   |
+
+- **Prometheus (HTTP API):**
+  - 3/3 targets up.
+  - `sy_cost_usd_total` by team: docsqa $0.165, opsagent $0.025, sandbox $0.0084, evals
+    $0.0005. Cache savings for docsqa: $0.376.
+  - Fallback reasons seen: `rate_limited`, `circuit_open`, `upstream_unavailable`. Breaker
+    states 1 and 2 were observed.
+  - Sandbox budget utilization 0.84. 39 key-RPM rejections. Stream lag 0. The worker inserted
+    1916 events.
+  - All rule groups loaded, with `SwitchyardCircuitOpen` pending.
+- **Grafana (HTTP API):** 3 dashboards in the "Switchyard" folder at schemaVersion 42. Both
+  datasources healthy (Postgres: "Database Connection OK"). Peak memory: Grafana 378 MiB (the
+  limit was raised from 384 MiB to 512 MiB), gateway 164 MiB.
+- **Screenshots:** `observability/screenshots/switchyard-{overview,cost,providers}.png`.
+- **Config change:** after `usage.stream_maxlen: 100000` was added, gateway and worker were
+  restarted. `/readyz` returned ready, and `/readyz?probe=1` returned 401 without the admin
+  token and 200 with it.
+- **Teardown:** `make compose-down` (`down -v`) left 0 containers and 0 volumes.
+
+**kind** (`make k8s-up` → `make k8s-demo` → `make k8s-down`):
+
+- **Preconditions:** 5.4 GB RAM available and 16 GB disk free. Observability stayed enabled.
+- **Apply:** 26 resources created.
+  - The first attempt failed at plan time on a conditional type mismatch in the switchyard
+    module. The second exposed a PSA violation: the kubernetes provider sends
+    `runAsNonRoot: false` when the field is unset. Both are fixed.
+  - A later apply added metrics-server and ran a Helm upgrade (revision 2), which put the
+    migration hook through the upgrade path as well.
+- **Pods:** all Running/Ready (2 API, worker, Postgres, Redis, mock-provider, Prometheus,
+  Grafana, operator, kube-state-metrics, metrics-server), and the seed Job Completed.
+- **Demo through NodePort 30787 → 127.0.0.1:8797:** 1585 requests, 1002 cache hits, 161
+  fallbacks, 152 streams, 28 × 429, 66 × 402, 0 × 5xx.
+- **Prometheus:**
+  - ServiceMonitor targets up: 2 × gateway :9464 and the worker :9465.
+  - All 4 Switchyard rule groups were loaded from the PrometheusRule.
+  - `sy_cost_usd_total` by team: docsqa $0.145, opsagent $0.023, sandbox $0.0010, evals $0.0005.
+- **Grafana:** the Postgres datasource was healthy.
+- **`kubectl top`:**
+  - node: 285m CPU, 2516 Mi
+  - Grafana 414 Mi, Prometheus 260 Mi, API 173 / 149 Mi, mock 88 Mi, worker 54 Mi, Postgres
+    50 Mi, Redis 5 Mi
+- **Screenshot:** `observability/screenshots/switchyard-cost-kind.png`.
+- **Teardown:** `make k8s-down` destroyed 26 resources, and `kind get clusters` reported "No
+  kind clusters found".
+
+**Static validation** (`make lint-infra lint-secrets audit`):
+
+- promtool: 11 rules, unit tests SUCCESS
+- helm lint: 0 failed
+- kubeconform `-strict` (Kubernetes 1.37): default values 12/12 valid, full values 16/16
+- `terraform fmt` and `validate` pass for both envs, and tflint is clean
+- actionlint clean, gitleaks found no leaks, and `pnpm audit --prod` found no known
+  vulnerabilities
+
+### Ops notes (from the security review, commit ab9df49)
+
+- `/readyz` (Redis + Postgres) is unauthenticated and suitable for kubelet probes.
+  `/readyz?probe=1`, which also probes the upstreams, now requires the admin token.
+- When a client sends `x-request-id`, the header is echoed back unchanged, but usage rows store
+  `<client-id>:req_<24 chars>`, so ledger idempotency on `(ts, request_id)` cannot drop distinct
+  requests. Search by prefix.
+- Compose, kind and the chart default set `usage.stream_maxlen: 100000`. The schema default is
+  1 000 000. At about 700 B per entry that is about 70 MB of Redis; see
+  [DEPLOYMENT.md § Redis sizing](DEPLOYMENT.md#redis-sizing).
+
+### Deviations (wave K)
+
+1. **The distroless base is `nodejs24-debian13`** (the brief did not name a Debian release). The
+   build stage uses `node:24.22.1-trixie-slim` to match. The image build runs tsdown with
+   `--no-dts`, because generating type declarations needs about 2 GB RSS and the image doesn't
+   use them. Unused js-tiktoken encodings (everything except o200k) are pruned to stay under
+   200 MB, and a tokenizer smoke check guards that pruning.
+2. **`make compose-down` always removes volumes** (`down -v`). `make compose-down -v` would be
+   parsed by make itself. `make compose-stop` keeps data.
+3. **The dashboards are generated** by `observability/grafana/generate-dashboards.mjs`; the JSON
+   is checked in, and CI fails if it is stale. The Providers dashboard filters on
+   `provider`/`route` instead of `team`, because upstream metrics carry no team label.
+4. **Alerts are copied into the chart** (`deploy/helm/switchyard/files/alerts.yml`), because Helm
+   cannot read files outside the chart. `make chart-sync` updates the copy, and `make lint-alerts`
+   fails if it has drifted.
+5. **The demo adds a fourth team, `sandbox`,** with a $0.002 monthly budget, so 402s happen
+   reliably.
+6. **Small fix in `packages/gateway/src/cli/commands.ts` (`seed-dev`).** With `--output`, keys
+   are now written only to the 0600 file: JSON output reports `key: null` and human output skips
+   the "New keys" block. This is what ADMIN.md already described, and it keeps keys out of
+   container and Job logs. No other `packages/**` changes were needed for containers.
+7. **The local-kind env adds metrics-server**, which kind lacks, so `kubectl top` works. The
+   Grafana image preload is opt-in (`preload_images`), because kind stages images in `$TMPDIR`,
+   which is a tmpfs on this machine.
+8. **Grafana's compose memory limit is 512 MiB.** It peaked at 378 MiB, too close to the
+   initial 384 MiB limit.
+
+### Infra known gaps
+
+- **The EKS environment has never been applied.** It is only validated, and has no remote state
+  backend.
+- **No Alertmanager** in compose or in the kind small-footprint profile. Alerts are visible in
+  Prometheus and Grafana only.
+- **No signing of the published image** (cosign). GitHub build-provenance attestations and an
+  SBOM are generated.
+- **The GitHub workflows have not run on GitHub yet.** No push was made; they pass actionlint
+  and every step was exercised locally.
+- **Prometheus cost counters reset on pod restart.** `increase()` handles that, but long-range
+  cost questions should use the Postgres panels.
+- **`terraform.tfstate` for local-kind is local** (gitignored). It contains generated passwords
+  while a cluster exists.
+
 ## Known gaps
 
 - **No OpenTelemetry tracing** (SPEC §13 spans). Metrics and logs are done.
-- **No Dockerfile, compose service, Helm chart or CI workflow.** These belong to the next wave.
+- **Infra gaps (wave K):** see [Infrastructure → known gaps](#infra-known-gaps).
 - **No changesets and no package-level README** for npm publishing.
 - **Redis Cluster is not supported:** the Lua scripts touch multiple keys without hash tags. Use a
   single primary, with replicas or Sentinel.
@@ -313,10 +460,12 @@ services, … }`) rather than a bare Hono app. `gateway.app` is the Hono app.
 
 ### Wave K (deploy / Docker / compose)
 
+Done; see [Infrastructure (wave K)](#infrastructure-wave-k). The original notes are kept below.
+
 - **Entrypoint:** `node packages/gateway/dist/cli.js serve --config <file>`. The `PORT` env var
   overrides the port, and `server.host` (default `0.0.0.0`) the bind address.
 - **Health checks:** `GET /healthz` is liveness (always 200). `GET /readyz` returns 503 while
-  draining, and `?probe=1` probes the providers.
+  draining. `?probe=1` probes the providers and requires the admin token.
 - **Shutdown:** SIGTERM/SIGINT drain in-flight requests with `server.shutdown_grace_ms` (default
   15 s). SIGHUP reloads the config.
 - **Mock provider:** `switchyard mock-provider --port 8790` is a ready-made upstream for compose

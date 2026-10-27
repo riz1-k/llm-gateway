@@ -1,0 +1,14 @@
+# Loads the Switchyard dashboards (observability/grafana/dashboards/*.json) into a "Switchyard" folder.
+apiVersion: 1
+
+providers:
+  - name: switchyard
+    folder: Switchyard
+    folderUid: switchyard
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards/switchyard
+      foldersFromFilesStructure: false

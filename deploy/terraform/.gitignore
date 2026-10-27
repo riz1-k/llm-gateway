@@ -1,0 +1,15 @@
+# Terraform working files (lock files are committed).
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+*.auto.tfvars
+terraform.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+# kubeconfig written by the local-kind env
+**/.kubeconfig

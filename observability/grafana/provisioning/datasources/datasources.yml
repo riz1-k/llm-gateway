@@ -1,0 +1,33 @@
+# Grafana datasources for the docker compose stack. UIDs are referenced by the dashboards'
+# default datasource variables; credentials come from the container environment.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST
+
+  - name: Switchyard Postgres
+    uid: switchyard-postgres
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: postgres:5432
+    user: ${GRAFANA_PG_USER}
+    editable: false
+    jsonData:
+      database: llmgateway
+      sslmode: disable
+      postgresVersion: 1800
+      timescaledb: false
+      maxOpenConns: 5
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+    secureJsonData:
+      password: ${GRAFANA_PG_PASSWORD}

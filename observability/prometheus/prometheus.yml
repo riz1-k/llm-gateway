@@ -1,0 +1,21 @@
+# Prometheus config for the docker compose stack (deploy/docker/docker-compose.yml).
+# In Kubernetes the Helm chart's ServiceMonitors replace these static scrape jobs.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: compose
+
+rule_files:
+  - /etc/prometheus/rules/alerts.yml
+
+scrape_configs:
+  - job_name: switchyard-gateway
+    static_configs:
+      - targets: ['gateway:9464'] # metrics.port in config/gateway.compose.yaml
+  - job_name: switchyard-worker
+    static_configs:
+      - targets: ['worker:9465'] # switchyard worker --port 9465
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

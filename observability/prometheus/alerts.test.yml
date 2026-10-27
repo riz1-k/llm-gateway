@@ -1,0 +1,125 @@
+# Unit tests for alerts.yml:  promtool test rules alerts.test.yml
+rule_files:
+  - alerts.yml
+evaluation_interval: 1m
+
+tests:
+  - name: 5xx ratio above 5 % on a busy route fires after 5m
+    interval: 1m
+    input_series:
+      - series: 'sy_requests_total{route="docsqa-chat",status="200",provider="p",model="m",cache="miss"}'
+        values: '0+60x20' # 1 rps
+      - series: 'sy_requests_total{route="docsqa-chat",status="503",provider="p",model="m",cache="miss"}'
+        values: '0+12x20' # 0.2 rps → 1/6 ≈ 16.7 %
+      - series: 'sy_requests_total{route="quiet",status="503",provider="p",model="m",cache="miss"}'
+        values: '0+1x20' # 100 % errors but only 1 req/min → below the traffic floor
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: SwitchyardHighErrorRate
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: SwitchyardHighErrorRate
+        exp_alerts:
+          - exp_labels: { severity: critical, route: docsqa-chat }
+            exp_annotations:
+              summary: 'Switchyard route docsqa-chat returns 16.67% 5xx'
+              description: 'More than 5 % of requests on route docsqa-chat failed with a 5xx after retries and fallbacks for 5 minutes. Check the "Providers & Reliability" dashboard (breakers, upstream errors) and GET /admin/providers/health.'
+              runbook_url: https://github.com/riz1-k/llm-gateway/blob/main/docs/OBSERVABILITY.md#switchyardhigherrorrate
+
+  - name: p95 latency above 30 s fires after 10m
+    interval: 1m
+    input_series:
+      - series: 'sy_request_duration_seconds_bucket{route="opsagent-chat",status="200",le="10"}'
+        values: '0x30'
+      - series: 'sy_request_duration_seconds_bucket{route="opsagent-chat",status="200",le="60"}'
+        values: '0+10x30'
+      - series: 'sy_request_duration_seconds_bucket{route="opsagent-chat",status="200",le="+Inf"}'
+        values: '0+10x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: SwitchyardHighLatencyP95
+        exp_alerts:
+          - exp_labels: { severity: warning, route: opsagent-chat }
+            exp_annotations:
+              summary: 'Switchyard route opsagent-chat p95 latency is 57.5s'
+              description: 'The 95th percentile end-to-end latency of route opsagent-chat has been above 30 s for 10 minutes (slow upstream, queueing on max_concurrency, or long fallback chains).'
+              runbook_url: https://github.com/riz1-k/llm-gateway/blob/main/docs/OBSERVABILITY.md#switchyardhighlatencyp95
+
+  - name: breaker open on any replica fires after 5m, half-open does not
+    interval: 1m
+    input_series:
+      - series: 'sy_circuit_state{target="large-throttled",instance="a"}'
+        values: '2x10'
+      - series: 'sy_circuit_state{target="large-throttled",instance="b"}'
+        values: '2x10'
+      - series: 'sy_circuit_state{target="large-flaky",instance="a"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: SwitchyardCircuitOpen
+        exp_alerts:
+          - exp_labels: { severity: warning, target: large-throttled }
+            exp_annotations:
+              summary: 'Circuit breaker for target large-throttled is open'
+              description: 'The breaker of target large-throttled has been open for 5 minutes; traffic is served by fallbacks (or fails if none are left). Inspect upstream health and credentials.'
+              runbook_url: https://github.com/riz1-k/llm-gateway/blob/main/docs/OBSERVABILITY.md#switchyardcircuitopen
+
+  - name: budget utilization thresholds
+    interval: 1m
+    input_series:
+      - series: 'sy_budget_utilization_ratio{team="docsqa",period="monthly",instance="a"}'
+        values: '0.95x5'
+      - series: 'sy_budget_utilization_ratio{team="sandbox",period="monthly",instance="a"}'
+        values: '1.2x5'
+      - series: 'sy_budget_utilization_ratio{team="evals",period="monthly",instance="a"}'
+        values: '0.5x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SwitchyardBudgetNearlyExhausted
+        exp_alerts:
+          - exp_labels: { severity: warning, team: docsqa, period: monthly }
+            exp_annotations:
+              summary: 'Team docsqa used 95% of its monthly budget'
+              description: 'Team docsqa is above 90 % of its monthly budget. With budgets.enforcement: hard (the default), requests get 402 budget_exceeded once the limit is reached.'
+              runbook_url: https://github.com/riz1-k/llm-gateway/blob/main/docs/OBSERVABILITY.md#switchyardbudgetnearlyexhausted
+          - exp_labels: { severity: warning, team: sandbox, period: monthly }
+            exp_annotations:
+              summary: 'Team sandbox used 120% of its monthly budget'
+              description: 'Team sandbox is above 90 % of its monthly budget. With budgets.enforcement: hard (the default), requests get 402 budget_exceeded once the limit is reached.'
+              runbook_url: https://github.com/riz1-k/llm-gateway/blob/main/docs/OBSERVABILITY.md#switchyardbudgetnearlyexhausted
+      - eval_time: 3m
+        alertname: SwitchyardBudgetExhausted
+        exp_alerts:
+          - exp_labels: { severity: critical, team: sandbox, period: monthly }
+            exp_annotations:
+              summary: 'Team sandbox exhausted its monthly budget'
+              description: 'Team sandbox reached 100 % of its monthly budget; priced requests are rejected with 402 until the period rolls over or the budget is raised (PUT /admin/teams/sandbox/budgets).'
+              runbook_url: https://github.com/riz1-k/llm-gateway/blob/main/docs/OBSERVABILITY.md#switchyardbudgetexhausted
+
+  - name: usage pipeline
+    interval: 1m
+    input_series:
+      - series: 'sy_usage_stream_lag{instance="a"}'
+        values: '20000x15'
+      - series: 'sy_usage_events_dropped_total{instance="a"}'
+        values: '0 0 0 5 5 5 5 5 5 5 5 5'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: SwitchyardUsageStreamLag
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: 'Usage stream lag is 20k events'
+              description: 'More than 10k usage events are waiting in the Redis stream for 10 minutes: the usage worker is down or too slow. Cost reports and budget reconciliation are delayed. Scale the worker Deployment or check its logs.'
+              runbook_url: https://github.com/riz1-k/llm-gateway/blob/main/docs/OBSERVABILITY.md#switchyardusagestreamlag
+      - eval_time: 4m
+        alertname: SwitchyardUsageEventsDropped
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: 'Switchyard dropped 5 usage events'
+              description: 'Redis was unavailable long enough for the in-memory usage buffer (usage.buffer_max) to overflow; the dropped requests are missing from cost reports.'
+              runbook_url: https://github.com/riz1-k/llm-gateway/blob/main/docs/OBSERVABILITY.md#switchyardusageeventsdropped
+      - eval_time: 11m
+        alertname: SwitchyardUsageEventsDropped
+        exp_alerts: []

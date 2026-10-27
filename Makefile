@@ -1,22 +1,42 @@
-# Switchyard developer shortcuts.
-.PHONY: install build test test-live lint typecheck dev mock validate clean
+# Switchyard developer shortcuts.  `make help` lists the targets.
+SHELL := /usr/bin/env bash
+.DEFAULT_GOAL := help
 
-install:
+IMAGE        ?= switchyard:dev
+VERSION      ?= $(shell node -p "require('./packages/gateway/package.json').version" 2>/dev/null || echo 0.0.0)
+REVISION     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+COMPOSE      := docker compose -f deploy/docker/docker-compose.yml
+KIND_ENV     := deploy/terraform/envs/local-kind
+TOOLS_DIR    ?= $(or $(TMPDIR),/tmp)/switchyard-tools
+DEMO_SECONDS ?= 120
+CHART        := deploy/helm/switchyard
+GRAFANA_URL  ?= http://127.0.0.1:3301
+
+.PHONY: help install build test test-live lint typecheck dev mock validate clean \
+        image compose-up compose-demo compose-down compose-stop compose-logs compose-ps \
+        dashboards dashboards-check screenshots chart-sync tools lint-alerts lint-helm lint-terraform lint-workflows lint-secrets audit lint-infra \
+        k8s-up k8s-demo k8s-down
+
+help:               ## show this help
+	@grep -hE '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+
+# ── development ──────────────────────────────────────────────────────────────────────────────
+install:            ## pnpm install
 	pnpm install
 
-build:
+build:              ## build all packages
 	pnpm build
 
-test:
+test:               ## unit + integration tests (needs local Redis/Postgres)
 	pnpm test
 
 test-live:          ## opt-in: ≤ 6 real Copilot calls through the opencode bridge
 	bash -c 'set -a; source ../devenv/.env; set +a; pnpm test:live'
 
-lint:
+lint:               ## eslint + prettier
 	pnpm lint
 
-typecheck:
+typecheck:          ## tsc --noEmit
 	pnpm typecheck
 
 dev:                ## gateway on :8787 with config/gateway.local.yaml
@@ -25,8 +45,105 @@ dev:                ## gateway on :8787 with config/gateway.local.yaml
 mock:               ## standalone mock provider on :8790
 	pnpm mock
 
-validate:
+validate:           ## validate config/gateway.local.yaml
 	pnpm --filter switchyard-gateway exec tsx src/cli.ts validate-config ../../config/gateway.local.yaml
 
 clean:
 	rm -rf packages/*/dist packages/*/coverage
+
+# ── container image & docker compose ─────────────────────────────────────────────────────────
+image:              ## build the container image ($(IMAGE))
+	docker build -f deploy/docker/Dockerfile -t $(IMAGE) \
+	  --build-arg VERSION=$(VERSION) --build-arg REVISION=$(REVISION) \
+	  --build-arg CREATED=$$(date -u +%Y-%m-%dT%H:%M:%SZ) .
+
+compose-up: image   ## start the full stack (gateway :8797, Grafana :3301, Prometheus :9091)
+	SWITCHYARD_IMAGE=$(IMAGE) $(COMPOSE) up -d --no-build --wait --wait-timeout 180
+	@echo "gateway    http://127.0.0.1:8797   (admin token: see deploy/docker/docker-compose.yml)"
+	@echo "grafana    http://127.0.0.1:3301   (admin / \$$GRAFANA_ADMIN_PASSWORD, default switchyard-local)"
+	@echo "prometheus http://127.0.0.1:9091"
+
+compose-demo:       ## seed teams/budgets and send $(DEMO_SECONDS)s of demo traffic
+	SWITCHYARD_IMAGE=$(IMAGE) $(COMPOSE) --profile demo run --rm --no-deps seed
+	node deploy/demo/traffic.mjs --url http://127.0.0.1:$${GATEWAY_PORT:-8797} --duration $(DEMO_SECONDS)
+
+compose-down:       ## stop the stack and delete its volumes
+	$(COMPOSE) --profile demo down -v --remove-orphans
+
+compose-stop:       ## stop the stack, keep volumes
+	$(COMPOSE) --profile demo down --remove-orphans
+
+compose-logs:       ## follow gateway + worker logs
+	$(COMPOSE) logs -f gateway worker
+
+compose-ps:
+	$(COMPOSE) ps
+
+# ── observability ────────────────────────────────────────────────────────────────────────────
+dashboards:         ## regenerate observability/grafana/dashboards/*.json
+	node observability/grafana/generate-dashboards.mjs
+
+dashboards-check:   ## fail if the generated dashboards are stale
+	node observability/grafana/generate-dashboards.mjs --check
+
+screenshots:        ## PNGs of the three dashboards from Grafana at $(GRAFANA_URL) (needs uv + Chrome)
+	uv run --no-project observability/screenshots/capture.py --url $(GRAFANA_URL) \
+	  --password "$${GRAFANA_ADMIN_PASSWORD:-switchyard-local}"
+
+# ── infra linting (pinned tool binaries downloaded to $(TOOLS_DIR)) ──────────────────────────
+tools:              ## download promtool, kubeconform, actionlint, tflint, gitleaks
+	@deploy/scripts/install-tools.sh $(TOOLS_DIR)
+
+chart-sync:         ## copy observability/prometheus/alerts.yml into the Helm chart
+	cp observability/prometheus/alerts.yml $(CHART)/files/alerts.yml
+
+lint-alerts: tools  ## promtool check + unit-test the alert rules (+ chart copy in sync)
+	@cmp -s observability/prometheus/alerts.yml $(CHART)/files/alerts.yml || \
+	  { echo "$(CHART)/files/alerts.yml is stale: run 'make chart-sync'"; exit 1; }
+	$(TOOLS_DIR)/promtool check rules observability/prometheus/alerts.yml
+	$(TOOLS_DIR)/promtool test rules observability/prometheus/alerts.test.yml
+	$(TOOLS_DIR)/promtool check config --syntax-only observability/prometheus/prometheus.yml
+
+lint-helm: tools    ## helm lint + kubeconform -strict on the rendered chart (every ci/*-values.yaml)
+	@mkdir -p $(TOOLS_DIR)/kubeconform-cache
+	@for v in $(CHART)/ci/*-values.yaml; do \
+	  echo "helm lint + kubeconform: $$v"; \
+	  helm lint --strict $(CHART) -f $$v | tail -1 || exit 1; \
+	  helm template sy $(CHART) -f $$v --api-versions monitoring.coreos.com/v1 \
+	    | $(TOOLS_DIR)/kubeconform -strict -summary -kubernetes-version 1.37.0 -cache $(TOOLS_DIR)/kubeconform-cache \
+	        -schema-location default \
+	        -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+	    || exit 1; \
+	done
+
+lint-terraform: tools ## terraform fmt -check, validate (all envs/modules) and tflint
+	terraform fmt -check -recursive deploy/terraform
+	@for d in deploy/terraform/envs/*; do \
+	  echo "terraform validate: $$d"; \
+	  terraform -chdir=$$d init -backend=false -input=false -no-color >/dev/null && \
+	  terraform -chdir=$$d validate -no-color || exit 1; \
+	done
+	cd deploy/terraform && $(TOOLS_DIR)/tflint --init >/dev/null && $(TOOLS_DIR)/tflint --recursive --config "$$PWD/.tflint.hcl"
+
+lint-workflows: tools ## actionlint
+	$(TOOLS_DIR)/actionlint -color
+
+lint-secrets: tools   ## gitleaks over the git history (rules: .gitleaks.toml)
+	$(TOOLS_DIR)/gitleaks git --config .gitleaks.toml --redact --no-banner .
+
+audit:              ## pnpm audit of production dependencies (fails on high/critical)
+	pnpm audit --prod --audit-level=high
+
+lint-infra: dashboards-check lint-alerts lint-helm lint-terraform lint-workflows ## all infra checks
+
+# ── Kubernetes (kind via Terraform) ──────────────────────────────────────────────────────────
+k8s-up:             ## create the kind cluster and deploy everything (gateway :8797, Grafana :3301)
+	terraform -chdir=$(KIND_ENV) init -input=false
+	terraform -chdir=$(KIND_ENV) apply -auto-approve -input=false
+
+k8s-demo:           ## demo traffic through the kind NodePort
+	node deploy/demo/traffic.mjs --url http://127.0.0.1:8797 --duration $(DEMO_SECONDS) \
+	  --admin-token "$$(terraform -chdir=$(KIND_ENV) output -raw admin_token)"
+
+k8s-down:           ## destroy the kind cluster
+	terraform -chdir=$(KIND_ENV) destroy -auto-approve -input=false

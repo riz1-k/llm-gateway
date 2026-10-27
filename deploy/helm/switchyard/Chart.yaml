@@ -1,0 +1,17 @@
+apiVersion: v2
+name: switchyard
+description: Switchyard — OpenAI-compatible LLM gateway (routing, fallback, caching, rate limits, budgets, per-team cost tracking)
+type: application
+version: 0.1.0
+appVersion: '0.1.0'
+kubeVersion: '>=1.30.0-0'
+home: https://github.com/riz1-k/llm-gateway
+sources:
+  - https://github.com/riz1-k/llm-gateway
+keywords: [llm, gateway, openai, proxy, rate-limiting, finops]
+maintainers:
+  - name: riz1-k
+    url: https://github.com/riz1-k
+annotations:
+  artifacthub.io/license: MIT
+  artifacthub.io/containsSecurityUpdates: 'false'

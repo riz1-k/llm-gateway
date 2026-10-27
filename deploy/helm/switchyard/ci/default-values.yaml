@@ -1,0 +1,4 @@
+# helm lint / kubeconform: minimal install (required connection strings only).
+secrets:
+  databaseUrl: postgres://switchyard:ci-password@postgres:5432/llmgateway
+  redisUrl: redis://redis:6379/0

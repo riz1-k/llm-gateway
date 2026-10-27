@@ -1,0 +1,16 @@
+# Allow-list build context for deploy/docker/Dockerfile: only what the image build needs.
+# Everything else (node_modules, dist, .git, docs, deploy, tests, local configs/.env) stays out.
+*
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.base.json
+!config/pricing.json
+!packages/*/package.json
+!packages/*/tsconfig*.json
+!packages/*/src
+!packages/gateway/tsdown.config.ts
+!packages/gateway/drizzle
+**/node_modules
+**/dist
+**/*.test.ts

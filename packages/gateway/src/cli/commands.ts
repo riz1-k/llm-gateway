@@ -613,8 +613,10 @@ export async function cmdSeedDev(args: string[]): Promise<number> {
   });
   return withAdmin(values, async (api) => {
     const res = await seedDev(api, { rotate: values.rotate === true });
+    // With --output, plaintext keys go only to the 0600 file (never to stdout / container logs).
+    const toFile = values.output !== undefined;
     if (values.json) {
-      out(JSON.stringify(res, null, 2));
+      out(JSON.stringify(toFile ? res.map((r) => ({ ...r, key: null })) : res, null, 2));
     } else {
       out(
         table(
@@ -629,8 +631,10 @@ export async function cmdSeedDev(args: string[]): Promise<number> {
       );
       const fresh = res.filter((r) => r.key);
       if (fresh.length > 0) {
-        out('\n# New keys (shown once):');
-        for (const r of fresh) out(`${r.envVar}=${r.key}`);
+        if (!toFile) {
+          out('\n# New keys (shown once):');
+          for (const r of fresh) out(`${r.envVar}=${r.key}`);
+        }
       } else {
         out(
           '\nAll seed keys already exist; plaintexts are not retrievable. Use --rotate to issue new ones.',

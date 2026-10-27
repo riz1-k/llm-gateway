@@ -1,0 +1,241 @@
+# Switchyard — full local stack: gateway + usage worker + migrations + Redis 8 + Postgres 18 +
+# mock upstream + Prometheus + Grafana (provisioned datasources and dashboards).
+#
+#   make compose-up      # build the image, start everything, wait for health checks
+#   make compose-demo    # seed teams/budgets and generate demo traffic
+#   make compose-down    # stop and delete volumes
+#
+# Host ports are bound to 127.0.0.1 and chosen not to clash with native dev services:
+#   gateway :8797 · Prometheus :9091 · Grafana :3301 · Postgres :55432 · Redis :56379
+# Defaults below are local-demo placeholders; override them in deploy/docker/.env (see .env.example).
+name: switchyard
+
+x-switchyard: &switchyard
+  image: ${SWITCHYARD_IMAGE:-switchyard:dev}
+  build:
+    context: ../..
+    dockerfile: deploy/docker/Dockerfile
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ['no-new-privileges:true']
+  restart: unless-stopped
+  init: true
+  logging:
+    driver: json-file
+    options: { max-size: 10m, max-file: '3' }
+
+x-switchyard-env: &switchyard-env
+  REDIS_URL: redis://redis:6379/0
+  DATABASE_URL: postgres://switchyard:${POSTGRES_PASSWORD:-switchyard-local}@postgres:5432/llmgateway
+  SWITCHYARD_ADMIN_TOKEN: ${SWITCHYARD_ADMIN_TOKEN:-sk-sy-demo-admin-token}
+  MOCK_PROVIDER_URL: http://mock-provider:8790/v1
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+x-switchyard-config: &switchyard-config
+  - ../../config/gateway.compose.yaml:/etc/switchyard/gateway.yaml:ro
+  - ../../config/pricing.json:/etc/switchyard/pricing.json:ro
+
+# Health checks without a shell (distroless): node's built-in fetch.
+x-node-healthcheck: &node-healthcheck
+  interval: 5s
+  timeout: 3s
+  retries: 20
+  start_period: 5s
+
+services:
+  postgres:
+    image: postgres:18.6-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
+    command:
+      [
+        postgres,
+        -c,
+        shared_buffers=64MB,
+        -c,
+        max_connections=60,
+        -c,
+        log_min_duration_statement=1000,
+      ]
+    environment:
+      POSTGRES_DB: llmgateway
+      POSTGRES_USER: switchyard
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-switchyard-local}
+      GRAFANA_PG_USER: grafana_reader
+      GRAFANA_PG_PASSWORD: ${GRAFANA_PG_PASSWORD:-grafana-local}
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./postgres/10-grafana-reader.sh:/docker-entrypoint-initdb.d/10-grafana-reader.sh:ro
+    ports: ['127.0.0.1:${POSTGRES_PORT:-55432}:5432']
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U switchyard -d llmgateway']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 256m
+    cpus: 1.0
+    restart: unless-stopped
+
+  redis:
+    # Redis 8 is required (vector sets back the semantic cache). It holds non-cache state too
+    # (usage stream, budget counters, breakers), so it never evicts and persists with AOF.
+    image: redis:8.8.4-alpine@sha256:be8dfdf58574d626e0abe03073ce9178509e0e9564a316e34e71d2289b8370e1
+    command:
+      [
+        redis-server,
+        --appendonly,
+        'yes',
+        --maxmemory,
+        192mb,
+        --maxmemory-policy,
+        noeviction,
+        --save,
+        '',
+      ]
+    volumes: [redisdata:/data]
+    ports: ['127.0.0.1:${REDIS_PORT:-56379}:6379']
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 256m
+    cpus: 0.5
+    restart: unless-stopped
+
+  migrate:
+    <<: *switchyard
+    command: [migrate]
+    environment: *switchyard-env
+    volumes: *switchyard-config
+    restart: 'no'
+    depends_on:
+      postgres: { condition: service_healthy }
+    mem_limit: 192m
+
+  mock-provider:
+    <<: *switchyard
+    command: [mock-provider, --host, 0.0.0.0, --port, '8790']
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8790/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+    mem_limit: 128m
+    cpus: 0.5
+
+  gateway:
+    <<: *switchyard
+    command: [serve]
+    environment: *switchyard-env
+    volumes: *switchyard-config
+    ports: ['127.0.0.1:${GATEWAY_PORT:-8797}:8787']
+    # Reach services on the Docker host (opencode :4096, llama.cpp :8081-8083) as
+    # http://host.docker.internal:<port> — see docs/DEPLOYMENT.md "Using host services".
+    extra_hosts: ['host.docker.internal:host-gateway']
+    stop_grace_period: 20s
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      mock-provider: { condition: service_healthy }
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8787/readyz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+    mem_limit: 384m
+    cpus: 1.0
+
+  worker:
+    <<: *switchyard
+    command: [worker, --port, '9465']
+    environment: *switchyard-env
+    volumes: *switchyard-config
+    stop_grace_period: 20s
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    healthcheck:
+      <<: *node-healthcheck
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:9465/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+    mem_limit: 192m
+    cpus: 0.5
+
+  # One-shot: demo teams + monthly budgets (idempotent). Generated keys go to a tmpfs file and are
+  # discarded; the demo traffic script issues its own keys through the admin API.
+  seed:
+    <<: *switchyard
+    profiles: [demo]
+    command: [seed-dev, --output, /tmp/seed-keys.env]
+    environment: *switchyard-env
+    volumes: *switchyard-config
+    restart: 'no'
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    mem_limit: 192m
+
+  prometheus:
+    image: prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=2d
+      - --web.console.templates=/etc/prometheus/consoles
+    volumes:
+      - ../../observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../observability/prometheus/alerts.yml:/etc/prometheus/rules/alerts.yml:ro
+      - promdata:/prometheus
+    ports: ['127.0.0.1:${PROMETHEUS_PORT:-9091}:9090']
+    healthcheck:
+      test: [CMD, wget, -q, --spider, 'http://127.0.0.1:9090/-/ready']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 384m
+    cpus: 1.0
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-switchyard-local}
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: 'false'
+      GF_NEWS_NEWS_FEED_ENABLED: 'false'
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/switchyard/switchyard-overview.json
+      GRAFANA_PG_USER: grafana_reader
+      GRAFANA_PG_PASSWORD: ${GRAFANA_PG_PASSWORD:-grafana-local}
+    volumes:
+      - ../../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../observability/grafana/dashboards:/var/lib/grafana/dashboards/switchyard:ro
+      - grafanadata:/var/lib/grafana
+    ports: ['127.0.0.1:${GRAFANA_PORT:-3301}:3000']
+    depends_on:
+      prometheus: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: [CMD, wget, -q, --spider, 'http://127.0.0.1:3000/api/health']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 512m
+    cpus: 1.0
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  promdata:
+  grafanadata:

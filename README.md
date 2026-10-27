@@ -30,7 +30,7 @@ TypeScript (strict, ESM) · Hono · zod v4 · ajv · pino · ioredis (Redis 8) �
 | **Resilience**           | Retries with exponential backoff + full jitter honoring `Retry-After` (capped). Per-attempt timeout plus total route deadline. Circuit breakers per target (rolling window, consecutive-failure trip, exponential cooldown, half-open probe). Per-provider concurrency semaphores with queue timeout. **Streaming fallback until the first byte is flushed.** |
 | **Emulation layer**      | For backends without native support: tool calling via `<tool_call>` blocks with a tolerant parser, ajv schema validation and one repair round-trip; JSON mode (`json_object` / `json_schema`, strict) with validation and repair; multi-turn transcript rendering; reasoning-effort mapping.                                                                  |
 | **Cost attribution**     | Every response carries `x-sy-cost-usd` computed from usage × pricing table (cached / cache-write / reasoning tokens handled). Usage events per request (team, key, route, provider, tokens, cost, latency, TTFT, attempts, fallbacks, tags).                                                                                                                  |
-| **Ops**                  | Request-ID propagation, structured pino logs (never prompt bodies by default), `/healthz`, `/readyz` (+ provider probes), graceful shutdown with drain, hot config reload (SIGHUP / admin API) with atomic snapshot swap.                                                                                                                                     |
+| **Ops**                  | Request-ID propagation, structured pino logs (never prompt bodies by default), `/healthz`, `/readyz` (+ admin-only provider probes via `?probe=1`), graceful shutdown with drain, hot config reload (SIGHUP / admin API) with atomic snapshot swap.                                                                                                           |
 | **Teams & virtual keys** | Postgres-backed teams and `sk-sy-…` keys (SHA-256 at rest, plaintext shown once), with per-key route allow-lists, RPM/TPM overrides and expiry. Keys are cached in Redis and invalidated over pub/sub on every replica. Rotation supports a grace period, and every admin mutation is audit-logged.                                                           |
 | **Rate limits**          | Sliding-window RPM and TPM at key and team scope, checked in one atomic Lua call. TPM reserves the pre-flight estimate and is reconciled to actual usage. Returns OpenAI-style `x-ratelimit-*` headers plus `retry-after`.                                                                                                                                    |
 | **Budgets**              | Daily and monthly USD budgets per team. A pre-flight upper-bound check returns 402 `budget_exceeded`. Soft-threshold alerts fire once per period and can call a webhook. Spend is reconciled from Postgres, and the admin view shows utilization with a linear projection.                                                                                    |
@@ -186,7 +186,7 @@ YAML, validated by zod, with `${ENV}` / `${ENV:-default}` interpolation applied 
 | Request                                          | Meaning                                                           |
 | ------------------------------------------------ | ----------------------------------------------------------------- |
 | `Authorization: Bearer sk-sy-…` (or `x-api-key`) | virtual key bound to a team                                       |
-| `x-request-id`                                   | propagated (generated if absent/unsafe)                           |
+| `x-request-id`                                   | propagated (generated if absent/unsafe); see note below           |
 | `x-sy-user`, `x-sy-tags`                         | end-user attribution, comma-separated tags (land in usage events) |
 | `x-sy-cache: default \| bypass \| refresh`       | cache control                                                     |
 
@@ -200,6 +200,12 @@ YAML, validated by zod, with `${ENV}` / `${ENV:-default}` interpolation applied 
 | `x-sy-fallbacks`, `x-sy-latency-ms`                         | number of targets skipped/failed before success; gateway latency |
 | `x-ratelimit-{limit,remaining,reset}-{requests,tokens}`     | tightest rate-limit scope (key or team)                          |
 | `retry-after`, `retry-after-ms`                             | on 429 (gateway limits) and upstream-unavailable 503s            |
+
+A client-supplied `x-request-id` is echoed back unchanged and used in logs. Usage rows in
+Postgres store `<client-id>:req_<24 chars>` instead, because client ids are not guaranteed to be
+unique and the usage ledger is idempotent on `(ts, request_id)`. Search usage by prefix
+(`request_id LIKE '<client-id>:%'`). Plain `/readyz` (Redis + Postgres) is unauthenticated.
+`/readyz?probe=1`, which also probes every upstream, requires the admin token.
 
 Error codes (OpenAI envelope `{"error":{"message","type","code","param"}}`):
 
@@ -227,6 +233,30 @@ input_templates:
   query: 'task: search result | query: {text}'
   document: 'title: {title} | text: {text}' # {title} ← input_titles[i] or "none"
 ```
+
+## Deployment
+
+The same distroless image (188 MB, non-root) runs `serve`, `worker` and `migrate`. See
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for details and
+[docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) for dashboards, alerts and runbooks.
+
+```bash
+make compose-up && make compose-demo   # full stack: gateway :8797, Grafana :3301, Prometheus :9091
+make compose-down
+make k8s-up && make k8s-demo           # kind + Helm chart + kube-prometheus-stack via Terraform
+make k8s-down
+make lint-infra                        # promtool, helm lint + kubeconform, terraform/tflint, actionlint
+```
+
+| Path                      | What                                                                                             |
+| ------------------------- | ------------------------------------------------------------------------------------------------ |
+| `deploy/docker/`          | Dockerfile, `docker-compose.yml` (8 services, memory limits, healthchecks)                       |
+| `deploy/helm/switchyard/` | Helm chart: API + worker, migration hook, HPA, PDB, Ingress, ServiceMonitor, PrometheusRule      |
+| `deploy/terraform/`       | modules `switchyard`, `postgres`, `redis`, `observability`; envs `local-kind`, `aws-eks-example` |
+| `observability/`          | Grafana dashboards (generated), provisioning, Prometheus config, alert rules + unit tests        |
+| `.github/workflows/`      | CI (tests, audit, gitleaks, infra lint, image build) and multi-arch GHCR publishing              |
+
+![Cost & Budgets dashboard](observability/screenshots/switchyard-cost.png)
 
 ## Testing
 
@@ -273,6 +303,9 @@ Highlights:
   pipeline, Redis key layout, failure modes
 - [docs/METRICS.md](docs/METRICS.md): Prometheus metric reference, PromQL and Postgres queries
   for dashboards
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): image, Docker Compose, Helm, Terraform (kind, EKS
+  example), secrets, Redis sizing, upgrades
+- [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md): dashboards, alert rules, runbooks
 - [docs/STATUS.md](docs/STATUS.md): what exists, test results, deviations, roadmap notes
 - [docs/SPEC.md](docs/SPEC.md): the full specification
 

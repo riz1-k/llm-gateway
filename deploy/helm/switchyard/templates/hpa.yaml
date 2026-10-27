@@ -1,0 +1,7 @@
+{{- if .Values.api.autoscaling.enabled }}
+{{ include "switchyard.hpa" (dict "ctx" . "component" "api" "values" .Values.api) }}
+{{- end }}
+{{- if and .Values.worker.enabled .Values.worker.autoscaling.enabled }}
+---
+{{ include "switchyard.hpa" (dict "ctx" . "component" "worker" "values" .Values.worker) }}
+{{- end }}

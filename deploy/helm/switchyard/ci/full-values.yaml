@@ -1,0 +1,48 @@
+# helm lint / kubeconform: every optional feature enabled.
+image:
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+secrets:
+  create: false
+  existingSecret: switchyard-secrets
+pricing:
+  unit: usd_per_1m_tokens
+  models:
+    mock-extractive: { input: 3.0, output: 15.0 }
+api:
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    behavior:
+      scaleDown:
+        stabilizationWindowSeconds: 300
+worker:
+  replicaCount: 2
+  pdb:
+    enabled: true
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 4
+service:
+  type: NodePort
+  nodePort: 30787
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: '300'
+  hosts:
+    - host: llm.example.com
+      paths: [{ path: /, pathType: Prefix }]
+  tls:
+    - hosts: [llm.example.com]
+      secretName: llm-example-tls
+metrics:
+  serviceMonitor:
+    enabled: true
+    labels: { release: kube-prometheus-stack }
+  prometheusRule:
+    enabled: true
+env:
+  NODE_OPTIONS: --enable-source-maps --max-old-space-size=256

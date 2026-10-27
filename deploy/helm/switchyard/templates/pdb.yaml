@@ -1,0 +1,9 @@
+{{- $apiReplicas := ternary .Values.api.autoscaling.minReplicas .Values.api.replicaCount .Values.api.autoscaling.enabled }}
+{{- if and .Values.api.pdb.enabled (gt (int $apiReplicas) 1) }}
+{{ include "switchyard.pdb" (dict "ctx" . "component" "api" "values" .Values.api) }}
+{{- end }}
+{{- $workerReplicas := ternary .Values.worker.autoscaling.minReplicas .Values.worker.replicaCount .Values.worker.autoscaling.enabled }}
+{{- if and .Values.worker.enabled .Values.worker.pdb.enabled (gt (int $workerReplicas) 1) }}
+---
+{{ include "switchyard.pdb" (dict "ctx" . "component" "worker" "values" .Values.worker) }}
+{{- end }}

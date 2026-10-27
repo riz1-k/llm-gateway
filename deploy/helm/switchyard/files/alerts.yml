@@ -1,0 +1,119 @@
+# Switchyard alerting rules (Prometheus rule file format).
+#   Compose:    mounted into Prometheus (observability/prometheus/prometheus.yml)
+#   Kubernetes: loaded into kube-prometheus-stack as a PrometheusRule (deploy/terraform/modules/observability)
+# Validate: promtool check rules alerts.yml && promtool test rules alerts.test.yml
+# Metric reference: docs/METRICS.md. Replica-identical gauges are aggregated with max().
+groups:
+  - name: switchyard.traffic
+    rules:
+      - record: switchyard:requests:rate5m
+        expr: sum by (route) (rate(sy_requests_total[5m]))
+      - record: switchyard:requests_5xx:ratio_rate5m
+        expr: |
+          sum by (route) (rate(sy_requests_total{status=~"5.."}[5m]))
+            / sum by (route) (rate(sy_requests_total[5m]))
+      - record: switchyard:request_duration_seconds:p95_5m
+        expr: histogram_quantile(0.95, sum by (le, route) (rate(sy_request_duration_seconds_bucket[5m])))
+
+      - alert: SwitchyardHighErrorRate
+        expr: |
+          switchyard:requests_5xx:ratio_rate5m > 0.05
+            and on (route) switchyard:requests:rate5m > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Switchyard route {{ $labels.route }} returns {{ $value | humanizePercentage }} 5xx'
+          description: >-
+            More than 5 % of requests on route {{ $labels.route }} failed with a 5xx after retries and
+            fallbacks for 5 minutes. Check the "Providers & Reliability" dashboard (breakers, upstream
+            errors) and GET /admin/providers/health.
+          runbook_url: https://github.com/riz1-k/llm-gateway/blob/main/docs/OBSERVABILITY.md#switchyardhigherrorrate
+
+      - alert: SwitchyardHighLatencyP95
+        expr: switchyard:request_duration_seconds:p95_5m > 30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Switchyard route {{ $labels.route }} p95 latency is {{ $value | humanizeDuration }}'
+          description: >-
+            The 95th percentile end-to-end latency of route {{ $labels.route }} has been above 30 s for
+            10 minutes (slow upstream, queueing on max_concurrency, or long fallback chains).
+          runbook_url: https://github.com/riz1-k/llm-gateway/blob/main/docs/OBSERVABILITY.md#switchyardhighlatencyp95
+
+  - name: switchyard.resilience
+    rules:
+      - alert: SwitchyardCircuitOpen
+        expr: max by (target) (sy_circuit_state) == 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Circuit breaker for target {{ $labels.target }} is open'
+          description: >-
+            The breaker of target {{ $labels.target }} has been open for 5 minutes; traffic is served
+            by fallbacks (or fails if none are left). Inspect upstream health and credentials.
+          runbook_url: https://github.com/riz1-k/llm-gateway/blob/main/docs/OBSERVABILITY.md#switchyardcircuitopen
+
+  - name: switchyard.budgets
+    rules:
+      - alert: SwitchyardBudgetNearlyExhausted
+        expr: max by (team, period) (sy_budget_utilization_ratio) > 0.9
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Team {{ $labels.team }} used {{ $value | humanizePercentage }} of its {{ $labels.period }} budget'
+          description: >-
+            Team {{ $labels.team }} is above 90 % of its {{ $labels.period }} budget. With budgets.enforcement: hard (the default),
+            requests get 402 budget_exceeded once the limit is reached.
+          runbook_url: https://github.com/riz1-k/llm-gateway/blob/main/docs/OBSERVABILITY.md#switchyardbudgetnearlyexhausted
+      - alert: SwitchyardBudgetExhausted
+        expr: max by (team, period) (sy_budget_utilization_ratio) >= 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Team {{ $labels.team }} exhausted its {{ $labels.period }} budget'
+          description: >-
+            Team {{ $labels.team }} reached 100 % of its {{ $labels.period }} budget; priced requests are
+            rejected with 402 until the period rolls over or the budget is raised
+            (PUT /admin/teams/{{ $labels.team }}/budgets).
+          runbook_url: https://github.com/riz1-k/llm-gateway/blob/main/docs/OBSERVABILITY.md#switchyardbudgetexhausted
+
+  - name: switchyard.usage-pipeline
+    rules:
+      - alert: SwitchyardUsageStreamLag
+        expr: max(sy_usage_stream_lag) > 10000
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Usage stream lag is {{ $value | humanize }} events'
+          description: >-
+            More than 10k usage events are waiting in the Redis stream for 10 minutes: the usage worker is
+            down or too slow. Cost reports and budget reconciliation are delayed. Scale the worker
+            Deployment or check its logs.
+          runbook_url: https://github.com/riz1-k/llm-gateway/blob/main/docs/OBSERVABILITY.md#switchyardusagestreamlag
+      - alert: SwitchyardUsageEventsDropped
+        expr: sum(increase(sy_usage_events_dropped_total[5m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Switchyard dropped {{ $value | humanize }} usage events'
+          description: >-
+            Redis was unavailable long enough for the in-memory usage buffer (usage.buffer_max) to
+            overflow; the dropped requests are missing from cost reports.
+          runbook_url: https://github.com/riz1-k/llm-gateway/blob/main/docs/OBSERVABILITY.md#switchyardusageeventsdropped
+      - alert: SwitchyardPlatformDegraded
+        expr: sum by (component) (rate(sy_platform_errors_total[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Switchyard {{ $labels.component }} is failing open'
+          description: >-
+            Redis/Postgres errors in component {{ $labels.component }} are being handled fail-open
+            (rate limits, budgets or caching may be skipped). Check Redis and Postgres health.
+          runbook_url: https://github.com/riz1-k/llm-gateway/blob/main/docs/OBSERVABILITY.md#switchyardplatformdegraded

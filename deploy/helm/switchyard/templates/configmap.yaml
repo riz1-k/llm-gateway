@@ -1,0 +1,16 @@
+{{- if not .Values.existingConfigMap }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "switchyard.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "switchyard.labels" . | nindent 4 }}
+data:
+  gateway.yaml: |
+    {{- include "switchyard.gatewayConfig" . | nindent 4 }}
+  {{- with .Values.pricing }}
+  pricing.json: |
+    {{- toPrettyJson . | nindent 4 }}
+  {{- end }}
+{{- end }}

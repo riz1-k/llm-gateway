@@ -1,0 +1,35 @@
+Switchyard {{ .Chart.AppVersion }} is deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+  API:      {{ include "switchyard.fullname" . }}:{{ .Values.service.port }}  (OpenAI-compatible, /v1/*)
+  Metrics:  {{ include "switchyard.fullname" . }}-metrics:{{ .Values.api.metricsPort }}{{ if .Values.worker.enabled }}, {{ include "switchyard.fullname" . }}-worker-metrics:{{ .Values.worker.metricsPort }}{{ end }}
+
+1. Reach the gateway:
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+     http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}/v1/models
+{{- end }}
+{{- else if eq .Values.service.type "NodePort" }}
+     NODE_PORT=$(kubectl get -n {{ .Release.Namespace }} svc {{ include "switchyard.fullname" . }} -o jsonpath='{.spec.ports[0].nodePort}')
+     curl http://<node-ip>:$NODE_PORT/readyz
+{{- else }}
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "switchyard.fullname" . }} 8787:{{ .Values.service.port }}
+     curl http://127.0.0.1:8787/readyz
+{{- end }}
+
+2. Admin token (teams, keys, budgets — see docs/ADMIN.md):
+     kubectl -n {{ .Release.Namespace }} get secret {{ include "switchyard.secretName" . }} \
+       -o jsonpath='{.data.SWITCHYARD_ADMIN_TOKEN}' | base64 -d
+
+3. Create a team and a key:
+     switchyard teams create my-team --monthly-budget 25 --url http://127.0.0.1:8787 --admin-token "$TOKEN"
+     switchyard keys create --team my-team --url http://127.0.0.1:8787 --admin-token "$TOKEN"
+{{- if and .Values.metrics.serviceMonitor.enabled (not (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1")) }}
+
+WARNING: metrics.serviceMonitor.enabled=true but the monitoring.coreos.com/v1 API is not
+available, so no ServiceMonitor was created. Install the Prometheus Operator CRDs first.
+{{- end }}
+{{- if and .Values.worker.enabled (dig "usage" "in_process_writer" false .Values.config) }}
+
+WARNING: config.usage.in_process_writer=true together with worker.enabled — usage would be
+written by every API replica AND the worker. Disable one of them.
+{{- end }}

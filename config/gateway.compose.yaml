@@ -1,0 +1,169 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Switchyard — containerised demo config (docker compose + the local kind cluster).
+#
+# Every upstream is the bundled mock provider (`switchyard mock-provider`, service
+# `mock-provider:8790`), so the stack runs offline with zero LLM calls. Four "simulated
+# providers" point at that one server and differ only in the x-mock-* fault-injection headers
+# they send, which is enough to exercise retries, fallbacks, upstream 429s and circuit breakers:
+#
+#   sim-primary    healthy, ~80 ms
+#   sim-secondary  healthy, ~150 ms (cheaper "small" models)
+#   sim-flaky      ~30 % 503s            → retries + fallbacks on docsqa-chat
+#   sim-throttled  ~60 % 429s, 1 s retry → fallbacks + breaker trips on opsagent-chat
+#
+# Route names follow the cross-project contract (docsqa-*, opsagent-*, mock-*), so
+# `switchyard seed-dev` keys and the DocsQA/OpsAgent offline tiers work unchanged.
+#
+# Secrets/URLs come from the environment (compose `environment:`, k8s Secret):
+#   REDIS_URL, DATABASE_URL, SWITCHYARD_ADMIN_TOKEN   (required)
+#   MOCK_PROVIDER_URL                                 (default http://mock-provider:8790/v1)
+#
+# Pointing at real upstreams on the host instead (opencode :4096, llama.cpp :8081-8083): see
+# docs/DEPLOYMENT.md §"Using host services" — add a provider with
+# base_url http://host.docker.internal:<port> (compose maps host.docker.internal → host-gateway).
+#
+# Validate: switchyard validate-config config/gateway.compose.yaml
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+
+server:
+  port: ${PORT:-8787}
+  host: 0.0.0.0
+  request_timeout_ms: 60000
+  body_limit_mb: 10
+  shutdown_grace_ms: 15000
+
+redis:
+  url: '${REDIS_URL}'
+  key_prefix: 'sy:'
+  fail_open: true
+database:
+  url: '${DATABASE_URL}'
+  pool_max: 10
+
+auth:
+  admin_token: '${SWITCHYARD_ADMIN_TOKEN}'
+  # No static keys: teams/keys live in Postgres (seed job / admin API).
+  static_keys: []
+
+pricing_file: ./pricing.json
+
+retry: { attempts: 2, backoff_ms: 100, max_backoff_ms: 1000, max_retry_after_ms: 2000 }
+breaker:
+  window_s: 30
+  min_requests: 10
+  failure_rate: 0.5
+  consecutive_failures: 5
+  cooldown_s: 15
+  max_cooldown_s: 120
+
+providers:
+  sim-primary:
+    type: openai-compatible
+    base_url: ${MOCK_PROVIDER_URL:-http://mock-provider:8790/v1}
+    timeout_ms: 10000
+    max_concurrency: 32
+    queue_timeout_ms: 5000
+    headers: { x-mock-latency-ms: '80' }
+  sim-secondary:
+    type: openai-compatible
+    base_url: ${MOCK_PROVIDER_URL:-http://mock-provider:8790/v1}
+    timeout_ms: 10000
+    max_concurrency: 16
+    queue_timeout_ms: 5000
+    headers: { x-mock-latency-ms: '150' }
+  sim-flaky:
+    type: openai-compatible
+    base_url: ${MOCK_PROVIDER_URL:-http://mock-provider:8790/v1}
+    timeout_ms: 10000
+    headers: { x-mock-latency-ms: '60', x-mock-fail-rate: '0.3', x-mock-status: '503' }
+  sim-throttled:
+    type: openai-compatible
+    base_url: ${MOCK_PROVIDER_URL:-http://mock-provider:8790/v1}
+    timeout_ms: 10000
+    headers:
+      {
+        x-mock-latency-ms: '40',
+        x-mock-fail-rate: '0.6',
+        x-mock-status: '429',
+        x-mock-retry-after: '1',
+      }
+
+# Shadow prices (USD per 1M tokens) so the cost dashboards have realistic shapes.
+models:
+  large-primary:
+    { provider: sim-primary, model: mock-extractive, pricing: { input: 3.0, output: 15.0 } }
+  large-flaky:
+    { provider: sim-flaky, model: mock-extractive, pricing: { input: 3.0, output: 15.0 } }
+  large-throttled:
+    { provider: sim-throttled, model: mock-extractive, pricing: { input: 3.0, output: 15.0 } }
+  small-secondary:
+    { provider: sim-secondary, model: mock-echo, pricing: { input: 0.25, output: 1.25 } }
+  tools-primary: { provider: sim-primary, model: mock-tools, pricing: { input: 3.0, output: 15.0 } }
+  embed-primary:
+    provider: sim-primary
+    model: mock-embed
+    kind: embedding
+    input_templates: { query: 'query: {text}', document: 'passage: {text}' }
+    pricing: { input: 0.02 }
+  rerank-primary:
+    { provider: sim-primary, model: mock-rerank, kind: rerank, pricing: { per_request: 0.00002 } }
+
+routes:
+  docsqa-chat:
+    description: Answer generation (flaky primary → healthy fallback)
+    targets: [large-flaky, large-primary]
+    retry: { attempts: 2, backoff_ms: 50, max_backoff_ms: 500 }
+    timeout_ms: 30000
+    cache: { exact: { ttl_s: 3600 } }
+  docsqa-fast:
+    description: Cheap rewriting model
+    targets: [small-secondary]
+    cache: { exact: { ttl_s: 3600 } }
+  docsqa-judge:
+    description: Eval judge
+    targets: [small-secondary, large-primary]
+    cache: { exact: { ttl_s: 86400 } }
+  docsqa-embed:
+    targets: [embed-primary]
+    cache: { exact: { ttl_s: 86400 } }
+  docsqa-rerank:
+    targets: [rerank-primary]
+  opsagent-chat:
+    description: Tool-calling chat (throttled primary → healthy → small)
+    targets: [large-throttled, large-primary, small-secondary]
+    retry: { attempts: 1 }
+    timeout_ms: 30000
+    cache: { exact: { ttl_s: 600 } }
+  opsagent-judge:
+    targets: [small-secondary]
+    cache: { exact: { ttl_s: 86400 } }
+  mock-chat: { targets: [large-primary] }
+  mock-embed: { targets: [embed-primary] }
+  mock-rerank: { targets: [rerank-primary] }
+  mock-tools: { targets: [tools-primary] }
+
+limits:
+  defaults: { key: { rpm: 600, tpm: 2000000 }, team: { rpm: 1200, tpm: 5000000 } }
+  window_s: 60
+budgets:
+  enforcement: hard
+  soft_threshold: 0.8
+  reconcile_interval_s: 60
+usage:
+  stream: 'sy:usage'
+  batch_size: 500
+  flush_interval_ms: 1000
+  retention_days: 400
+  # Approximate MAXLEN for the usage stream (~700 B/entry → ~70 MB of Redis at the cap).
+  stream_maxlen: 100000
+  # Deployments run `switchyard worker` as its own service/Deployment.
+  in_process_writer: false
+metrics:
+  enabled: true
+  path: /metrics
+  port: 9464 # scrape port, kept off the API port (and off any ingress)
+  default_metrics: true
+observability:
+  log_level: '${LOG_LEVEL:-info}'
+  log_bodies: false
+  metrics: true
