@@ -13,6 +13,13 @@ const positiveInt = z.coerce.number().int().positive();
 const nonNegInt = z.coerce.number().int().min(0);
 const ms = z.coerce.number().int().min(1);
 
+/** Boolean that also accepts `"true"`/`"false"` (from `${ENV}` interpolation). */
+const flag = (defaultValue: boolean) =>
+  z.preprocess(
+    (v) => (v === 'true' ? true : v === 'false' ? false : v),
+    z.boolean().default(defaultValue),
+  );
+
 /** Optional string where an empty string (e.g. unset `${VAR:-}`) means "not set". */
 const optionalString = z
   .string()
@@ -591,21 +598,57 @@ export const configSchema = z.object({
       log_bodies: z
         .boolean()
         .default(false)
-        .describe('Reserved: prompt/response body logging is not implemented yet.'),
+        .describe(
+          'Reserved: prompt/response body logging is not implemented yet. Traces never carry bodies.',
+        ),
       metrics: z
         .boolean()
         .default(true)
         .describe('Legacy switch; metrics are on only when this and `metrics.enabled` are true.'),
       otel: z
         .object({
-          enabled: z.boolean().default(false).describe('Reserved.'),
-          endpoint: z.string().nullable().optional().describe('Reserved.'),
+          enabled: flag(false).describe(
+            'Start the OpenTelemetry SDK and export traces over OTLP/HTTP (`switchyard serve`). `OTEL_SDK_DISABLED=true` forces it off.',
+          ),
+          endpoint: z
+            .string()
+            .nullable()
+            .optional()
+            .transform((v) => (v == null || v.trim() === '' ? undefined : v.trim()))
+            .describe(
+              'OTLP/HTTP base URL, e.g. `http://127.0.0.1:4318` (`/v1/traces` is appended). Unset: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, then `OTEL_EXPORTER_OTLP_ENDPOINT`, then `http://localhost:4318`.',
+            ),
+          headers: z
+            .record(z.string(), z.string())
+            .optional()
+            .describe(
+              'Headers sent with every export (e.g. collector auth). Merged over `OTEL_EXPORTER_OTLP_HEADERS`.',
+            ),
+          service_name: optionalString.describe(
+            '`service.name` resource attribute. Unset: `OTEL_SERVICE_NAME`, then `switchyard`.',
+          ),
+          sample_ratio: z.coerce
+            .number()
+            .min(0)
+            .max(1)
+            .optional()
+            .describe(
+              "Share of new traces (requests without a sampled parent) to record. A caller's `traceparent` decision always wins. Unset: `OTEL_TRACES_SAMPLER`/`OTEL_TRACES_SAMPLER_ARG`, then 1.",
+            ),
+          resource_attributes: z
+            .record(z.string(), z.string())
+            .optional()
+            .describe(
+              'Extra resource attributes (e.g. `deployment.environment.name`). Merged over `OTEL_RESOURCE_ATTRIBUTES`.',
+            ),
         })
-        .optional()
-        .describe('Reserved: OpenTelemetry tracing is not implemented yet.'),
+        .prefault({})
+        .describe(
+          'OpenTelemetry tracing (docs/OBSERVABILITY.md § Tracing). Config values win over `OTEL_*` variables.',
+        ),
     })
     .prefault({})
-    .describe('Logging.'),
+    .describe('Logging and tracing.'),
 });
 
 /** Gateway configuration as written (YAML/JSON input shape of `configSchema`). */

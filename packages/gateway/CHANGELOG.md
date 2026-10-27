@@ -32,6 +32,10 @@ First public release.
   rollups, idempotent and crash-safe.
 - Prometheus metrics (`sy_*`), health and readiness endpoints, graceful shutdown, hot config
   reload (SIGHUP / `POST /admin/config/reload`).
+- Opt-in OpenTelemetry tracing (`observability.otel`, standard `OTEL_*` variables): a span per
+  `/v1` request and per upstream attempt with GenAI semantic conventions, W3C `traceparent` in
+  and out, `x-sy-trace-id` response header, `trace_id`/`span_id` in logs, OTLP/HTTP export. The
+  SDK packages are optional dependencies, loaded only when tracing is on.
 
 ### Packaging
 

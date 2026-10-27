@@ -59,6 +59,11 @@ RuntimeDefault seccomp profile. The chart passes the `restricted` Pod Security S
 | `secrets.redisUrl`                                  | `""`                        | Required when `secrets.create`. Must be a single Redis 8 primary (vector sets are used for the semantic cache).                     |
 | `secrets.extraEnv`                                  | `{}`                        | Extra secret env vars (e.g. `OPENAI_API_KEY`).                                                                                      |
 | `env`                                               | `{}`                        | Extra plain env vars for every container.                                                                                           |
+| `tracing.enabled`                                   | `false`                     | Turn on OpenTelemetry tracing: sets `observability.otel.enabled: true` in the rendered config. See [Tracing](#tracing).             |
+| `tracing.endpoint`                                  | `""`                        | OTLP/HTTP base URL (`OTEL_EXPORTER_OTLP_ENDPOINT`), e.g. `http://tempo.observability:4318`. Empty: `http://localhost:4318`.         |
+| `tracing.sampleRatio`                               | `1`                         | Share of new traces to record (`OTEL_TRACES_SAMPLER=parentbased_traceidratio`). A caller's `traceparent` decision always wins.      |
+| `tracing.serviceName`                               | `""` (`switchyard`)         | `OTEL_SERVICE_NAME`.                                                                                                                |
+| `tracing.resourceAttributes`                        | `{}`                        | Extra `OTEL_RESOURCE_ATTRIBUTES`. `k8s.namespace.name` and `k8s.pod.name` are always added.                                         |
 | `serviceAccount.create` / `name` / `annotations`    | `true` / `""` / `{}`        | For IRSA / Workload Identity, use the annotations.                                                                                  |
 | `serviceAccount.automountServiceAccountToken`       | `false`                     | Switchyard never talks to the Kubernetes API.                                                                                       |
 | `podSecurityContext`                                | non-root 65532, seccomp     |                                                                                                                                     |
@@ -95,6 +100,25 @@ RuntimeDefault seccomp profile. The chart passes the `restricted` Pod Security S
 
 `values.schema.json` validates all of the above. Unknown keys are rejected, except inside
 free-form maps (`config`, `pricing`, `env`, `secrets.extraEnv`, annotations and labels).
+
+## Tracing
+
+```yaml
+tracing:
+  enabled: true
+  endpoint: http://tempo.observability:4318 # or an OpenTelemetry Collector
+  sampleRatio: 0.1
+  resourceAttributes:
+    deployment.environment.name: prod
+```
+
+With `tracing.enabled`, the chart sets `observability.otel.enabled: true` in `gateway.yaml` and
+passes the rest as standard `OTEL_*` variables, plus `k8s.namespace.name` and `k8s.pod.name`
+from the downward API. Values written under `config.observability.otel` win over these
+variables ([OBSERVABILITY.md § Tracing](../../../docs/OBSERVABILITY.md#tracing)). The image
+already contains the OpenTelemetry SDK. For collector auth, put
+`OTEL_EXPORTER_OTLP_HEADERS` in `secrets.extraEnv` or the existing Secret. The worker and
+migration pods get the same variables but do not trace.
 
 ## Validation
 

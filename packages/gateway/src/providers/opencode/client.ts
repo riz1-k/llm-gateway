@@ -1,6 +1,7 @@
 import { ProviderError, parseRetryAfter, providerErrorFromStatus } from '../../core/errors.js';
 import type { OpencodeProviderConfig } from '../../config/schema.js';
 import { joinUrl } from '../base.js';
+import { injectTraceHeaders } from '../../observability/tracing.js';
 import { extractUpstreamMessage, mapFetchError, type FetchLike } from '../http.js';
 import type { OpencodePart } from './transcript.js';
 
@@ -120,10 +121,12 @@ export class OpencodeClient {
     try {
       res = await this.fetchImpl(this.url(path), {
         method,
-        headers: {
+        // Per-attempt calls carry the attempt span's traceparent (the shared /event subscription
+        // does not: it outlives any one request).
+        headers: injectTraceHeaders({
           ...this.headers,
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
-        },
+        }),
         body: body === undefined ? null : JSON.stringify(body),
         signal,
       });

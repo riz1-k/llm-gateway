@@ -38,13 +38,70 @@ docker run --rm switchyard:dev validate-config /etc/switchyard/gateway.yaml   # 
 | Filesystem                  | Works with a read-only root filesystem. It only needs a writable `/tmp` for `seed-dev --output`. |
 
 Images are published to `ghcr.io/riz1-k/switchyard` for linux/amd64 and linux/arm64, with SBOM
-and provenance attestations (`.github/workflows/docker.yml`):
+and provenance attestations, and signed with cosign (`.github/workflows/docker.yml`):
 
 - **Every release:** `<version>`, `<major>.<minor>` and `latest`. The release workflow calls the
   Docker workflow after the npm publish (see [RELEASING.md](RELEASING.md)).
 - **`main`:** `edge` and `sha-<short>`.
 
 Pin a version tag, or a digest, in production.
+
+### Verifying the image
+
+Every pushed image is signed by digest with [Sigstore](https://www.sigstore.dev) keyless signing:
+the workflow's GitHub OIDC token gets a short-lived Fulcio certificate, and the signature is
+recorded in the Rekor transparency log. There is no long-lived key. The certificate identity is
+the workflow file that signs, which is `docker.yml` in both entry points:
+
+| Image                                         | Built by                                                     | Certificate identity (SAN)                                                           | Workflow name in the certificate |
+| --------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------ | -------------------------------- |
+| `edge`, `sha-<short>`                         | `docker.yml` on push to `main`                               | `https://github.com/riz1-k/llm-gateway/.github/workflows/docker.yml@refs/heads/main` | `Docker image`                   |
+| `<version>`, `<major>.<minor>`, `latest`      | `release.yml` → `docker.yml` (reusable workflow)             | `https://github.com/riz1-k/llm-gateway/.github/workflows/docker.yml@refs/heads/main` | `Release`                        |
+| `sha-<short>` from a manual run or a `v*` tag | `docker.yml` (`workflow_dispatch`, or a pushed `v*.*.*` tag) | `…/docker.yml@refs/heads/<branch>` or `…/docker.yml@refs/tags/<tag>`                 | `Docker image`                   |
+
+A reusable workflow signs with its own identity, so release images carry `docker.yml`, not
+`release.yml`. The calling workflow is still recorded in the certificate: its name (shown above)
+and its path, in the Build Config URI
+(`https://github.com/riz1-k/llm-gateway/.github/workflows/release.yml@refs/heads/main`).
+
+Install [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) v3 (CI signs with
+v3.1.4) and verify any image built by this repository:
+
+```bash
+cosign verify ghcr.io/riz1-k/switchyard:edge \
+  --certificate-identity-regexp '^https://github.com/riz1-k/llm-gateway/\.github/workflows/docker\.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Stricter, for a release image: pin the exact identity (built from `main`) and require that the
+release workflow made the call:
+
+```bash
+cosign verify ghcr.io/riz1-k/switchyard:0.1.0 \
+  --certificate-identity https://github.com/riz1-k/llm-gateway/.github/workflows/docker.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-github-workflow-name Release
+```
+
+For `edge`, use the same exact identity with `--certificate-github-workflow-name 'Docker image'`.
+Verify a digest (`ghcr.io/riz1-k/switchyard@sha256:…`) rather than a tag when you pin one.
+
+The build-provenance attestation (SLSA v1, from `actions/attest-build-provenance`) is verified with
+the GitHub CLI. The signer is `docker.yml` for both entry points, so the same command works for
+`edge` and release tags:
+
+```bash
+gh attestation verify oci://ghcr.io/riz1-k/switchyard:edge \
+  --repo riz1-k/llm-gateway \
+  --signer-workflow riz1-k/llm-gateway/.github/workflows/docker.yml \
+  --source-ref refs/heads/main
+```
+
+The BuildKit SBOM and provenance are attached to the image index:
+`docker buildx imagetools inspect ghcr.io/riz1-k/switchyard:edge --format '{{ json .SBOM }}'`.
+
+To enforce signatures in a cluster, use a Sigstore admission controller (the policy-controller,
+or Kyverno `verifyImages`) with the identity and issuer above.
 
 ## Configuration and secrets
 
@@ -68,19 +125,20 @@ API. Validate any config with `switchyard validate-config <file>`.
 ## Docker Compose
 
 `deploy/docker/docker-compose.yml` (project name `switchyard`) is a local, loopback-only stack.
-Each service has a memory limit, so the whole stack fits in about 2.2 GB:
+Each service has a memory limit, so the whole stack fits in about 2.5 GB:
 
-| Service         | Image                     | Host port         | Limit  | Notes                                                                                                                    |
-| --------------- | ------------------------- | ----------------- | ------ | ------------------------------------------------------------------------------------------------------------------------ |
-| `gateway`       | `switchyard:dev`          | `127.0.0.1:8797`  | 384 MB | `serve`. Healthcheck on `/readyz`. Metrics on :9464 (container network only).                                            |
-| `worker`        | `switchyard:dev`          | none              | 192 MB | `worker --port 9465`                                                                                                     |
-| `migrate`       | `switchyard:dev`          | none              | none   | One-shot. `gateway` and `worker` wait for `service_completed_successfully`.                                              |
-| `mock-provider` | `switchyard:dev`          | none              | 128 MB | `mock-provider --port 8790`                                                                                              |
-| `postgres`      | `postgres:18.6-alpine`    | `127.0.0.1:55432` | 256 MB | DB `llmgateway`. An init script creates the read-only `grafana_reader` role.                                             |
-| `redis`         | `redis:8.8.4-alpine`      | `127.0.0.1:56379` | 256 MB | AOF, `maxmemory 192mb`, `noeviction`                                                                                     |
-| `prometheus`    | `prom/prometheus:v3.15.1` | `127.0.0.1:9091`  | 384 MB | Scrapes gateway and worker, loads `observability/prometheus/alerts.yml`                                                  |
-| `grafana`       | `grafana/grafana:13.2.4`  | `127.0.0.1:3301`  | 512 MB | Provisioned datasources and the three dashboards                                                                         |
-| `seed`          | `switchyard:dev`          | none              | none   | Profile `demo`: `seed-dev` creates the docsqa/opsagent/evals teams and writes keys only to a 0600 file in the container. |
+| Service         | Image                     | Host port                          | Limit  | Notes                                                                                                                                                  |
+| --------------- | ------------------------- | ---------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `gateway`       | `switchyard:dev`          | `127.0.0.1:8797`                   | 384 MB | `serve`. Healthcheck on `/readyz`. Metrics on :9464 (container network only).                                                                          |
+| `worker`        | `switchyard:dev`          | none                               | 192 MB | `worker --port 9465`                                                                                                                                   |
+| `migrate`       | `switchyard:dev`          | none                               | none   | One-shot. `gateway` and `worker` wait for `service_completed_successfully`.                                                                            |
+| `mock-provider` | `switchyard:dev`          | none                               | 128 MB | `mock-provider --port 8790`                                                                                                                            |
+| `postgres`      | `postgres:18.6-alpine`    | `127.0.0.1:55432`                  | 256 MB | DB `llmgateway`. An init script creates the read-only `grafana_reader` role.                                                                           |
+| `redis`         | `redis:8.8.4-alpine`      | `127.0.0.1:56379`                  | 256 MB | AOF, `maxmemory 192mb`, `noeviction`                                                                                                                   |
+| `prometheus`    | `prom/prometheus:v3.15.1` | `127.0.0.1:9091`                   | 384 MB | Scrapes gateway and worker, loads `observability/prometheus/alerts.yml`                                                                                |
+| `tempo`         | `grafana/tempo:3.1.1`     | `127.0.0.1:3201`, `127.0.0.1:4319` | 256 MB | Traces: Tempo API, and OTLP/HTTP for other local services. 24 h retention. The gateway exports to it (`SWITCHYARD_OTEL_ENABLED=false` turns that off). |
+| `grafana`       | `grafana/grafana:13.2.4`  | `127.0.0.1:3301`                   | 512 MB | Provisioned datasources (Prometheus, Postgres, Tempo) and the three dashboards                                                                         |
+| `seed`          | `switchyard:dev`          | none                               | none   | Profile `demo`: `seed-dev` creates the docsqa/opsagent/evals teams and writes keys only to a 0600 file in the container.                               |
 
 The host ports deliberately avoid the usual ones (5432, 6379, 8787, 9090, 3000), so the stack can
 run next to native services.

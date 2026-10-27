@@ -1,5 +1,5 @@
 # Switchyard — full local stack: gateway + usage worker + migrations + Redis 8 + Postgres 18 +
-# mock upstream + Prometheus + Grafana (provisioned datasources and dashboards).
+# mock upstream + Prometheus + Tempo + Grafana (provisioned datasources and dashboards).
 #
 #   make compose-up      # build the image, start everything, wait for health checks
 #   make compose-demo    # seed teams/budgets and generate demo traffic
@@ -7,6 +7,7 @@
 #
 # Host ports are bound to 127.0.0.1 and chosen not to clash with native dev services:
 #   gateway :8797 · Prometheus :9091 · Grafana :3301 · Postgres :55432 · Redis :56379
+#   Tempo API :3201 · OTLP/HTTP :4319 (other local services can send traces here)
 # Defaults below are local-demo placeholders; override them in deploy/docker/.env (see .env.example).
 name: switchyard
 
@@ -31,6 +32,9 @@ x-switchyard-env: &switchyard-env
   SWITCHYARD_ADMIN_TOKEN: ${SWITCHYARD_ADMIN_TOKEN:-sk-sy-demo-admin-token}
   MOCK_PROVIDER_URL: http://mock-provider:8790/v1
   LOG_LEVEL: ${LOG_LEVEL:-info}
+  # Tracing (observability.otel in config/gateway.compose.yaml): the gateway exports to Tempo.
+  SWITCHYARD_OTEL_ENABLED: ${SWITCHYARD_OTEL_ENABLED:-true}
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
 
 x-switchyard-config: &switchyard-config
   - ../../config/gateway.compose.yaml:/etc/switchyard/gateway.yaml:ro
@@ -78,7 +82,7 @@ services:
   redis:
     # Redis 8 is required (vector sets back the semantic cache). It holds non-cache state too
     # (usage stream, budget counters, breakers), so it never evicts and persists with AOF.
-    image: redis:8.8.4-alpine@sha256:be8dfdf58574d626e0abe03073ce9178509e0e9564a316e34e71d2289b8370e1
+    image: redis:8.10.0-alpine@sha256:978f0e01593e65eed801f2402944efcd936d43b5027e4908a7897baf88ed6241
     command:
       [
         redis-server,
@@ -203,6 +207,29 @@ services:
     cpus: 1.0
     restart: unless-stopped
 
+  # Traces: OTLP/HTTP in, Tempo API for Grafana. Local storage, 24 h retention.
+  tempo:
+    image: grafana/tempo:3.1.1@sha256:64e2fbd56d9c2b3412a4b430a58ea59e91a670b1e75f920a0c702213ad145044
+    command: [-config.file=/etc/tempo/tempo.yaml, -config.expand-env=true]
+    volumes:
+      - ../../observability/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempodata:/var/tempo
+    ports:
+      - '127.0.0.1:${TEMPO_PORT:-3201}:3200'
+      - '127.0.0.1:${TEMPO_OTLP_PORT:-4319}:4318'
+    healthcheck:
+      test: [CMD, /tempo, -health, -health.url=http://127.0.0.1:3200/ready]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    mem_limit: 256m
+    cpus: 0.5
+    restart: unless-stopped
+
   grafana:
     image: grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
     environment:
@@ -216,6 +243,7 @@ services:
       GF_NEWS_NEWS_FEED_ENABLED: 'false'
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/switchyard/switchyard-overview.json
       PROMETHEUS_URL: http://prometheus:9090
+      TEMPO_URL: http://tempo:3200
       GRAFANA_PG_HOST: postgres:5432
       GRAFANA_PG_USER: grafana_reader
       GRAFANA_PG_PASSWORD: ${GRAFANA_PG_PASSWORD:-grafana-local}
@@ -227,6 +255,7 @@ services:
     depends_on:
       prometheus: { condition: service_healthy }
       postgres: { condition: service_healthy }
+      tempo: { condition: service_healthy }
     healthcheck:
       test: [CMD, wget, -q, --spider, 'http://127.0.0.1:3000/api/health']
       interval: 5s
@@ -240,4 +269,5 @@ volumes:
   pgdata:
   redisdata:
   promdata:
+  tempodata:
   grafanadata:

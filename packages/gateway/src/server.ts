@@ -5,6 +5,7 @@ import { createGateway, type CreateGatewayOptions, type Gateway } from './app.js
 import { loadConfig } from './config/load.js';
 import { createLogger, type Logger } from './observability/logger.js';
 import { PromMetrics } from './observability/metrics.js';
+import { startTracing } from './observability/tracing.js';
 import { createPlatform, type Platform } from './platform/index.js';
 
 /**
@@ -117,6 +118,8 @@ const waitFor = async (cond: () => boolean, timeoutMs: number): Promise<boolean>
 export async function startServer(opts: StartServerOptions): Promise<RunningServer> {
   const config = loadConfig(opts.configPath);
   const logger = opts.logger ?? createLogger({ level: config.raw.observability.log_level });
+  // Before anything serves requests; a no-op (no SDK loaded) unless observability.otel.enabled.
+  const tracing = await startTracing(config, { logger });
   const wantsPlatform = Boolean(config.raw.redis?.url || config.raw.database?.url);
   const platform: Platform | undefined =
     typeof opts.platform === 'object'
@@ -196,6 +199,8 @@ export async function startServer(opts: StartServerOptions): Promise<RunningServ
       await closed;
       if (metricsServer) await new Promise<void>((resolve) => metricsServer.close(() => resolve()));
       await gateway.close();
+      // Last: spans of the drained requests are exported before the process exits.
+      await tracing.shutdown();
       logger.info('shutdown complete');
     })();
     return shuttingDown;

@@ -14,3 +14,4 @@
 - [ ] User-visible change: added a changeset (`pnpm changeset`)
 - [ ] Docs updated (README, docs/\*, config/gateway.example.yaml) where relevant
 - [ ] No secrets, prompt bodies or internal hostnames in logs or error messages
+- [ ] Workflow changes: actions pinned by commit SHA, `make lint-workflows` and zizmor pass

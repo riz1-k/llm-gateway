@@ -1,0 +1,88 @@
+# Dependabot version updates: monthly, grouped, few open PRs. Security updates are separate
+# (enable "Dependabot security updates" in the repository settings); they are grouped below too.
+# Commit prefixes follow Conventional Commits; labels must exist in the repository to be applied.
+version: 2
+
+updates:
+  # pnpm workspace: the root package.json + pnpm-lock.yaml cover packages/* (pnpm-workspace.yaml).
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown: # supply-chain buffer: skip releases younger than this
+      default-days: 7
+      semver-major-days: 14
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: fix(deps)
+      prefix-development: chore(deps-dev)
+    labels: [dependencies, javascript]
+    groups:
+      dev-dependencies:
+        dependency-type: development
+        update-types: [minor, patch]
+      production-dependencies:
+        dependency-type: production
+        update-types: [minor, patch]
+      security:
+        applies-to: security-updates
+        patterns: ['*']
+    # Majors are not grouped: each one gets its own PR so breaking changes are reviewed one by one.
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: ci(deps)
+    labels: [dependencies, github_actions]
+    groups:
+      actions:
+        patterns: ['*']
+
+  # Base images are pinned as tag@sha256:digest; Dependabot bumps the tag and the digest together
+  # (and the digest alone when a tag is re-published).
+  - package-ecosystem: docker
+    directory: /deploy/docker
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: build(deps)
+    labels: [dependencies, docker]
+    # The image's Node major follows .nvmrc and the CI test matrix (Node 22/24); a new major is a deliberate
+    # change made together with them, not a Dependabot bump.
+    ignore:
+      - dependency-name: node
+        update-types: [version-update:semver-major]
+    groups:
+      docker-images:
+        patterns: ['*']
+
+  # Compose demo stack (Postgres, Redis, Prometheus, Grafana). The ci.yml service images use the
+  # same Postgres and Redis digests and are updated by hand in the same PR.
+  - package-ecosystem: docker-compose
+    directory: /deploy/docker
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: build(deps)
+    labels: [dependencies, docker]
+    # Postgres and Redis majors change the on-disk format or semantics (Redis 8 vector sets back the semantic
+    # cache); upgrade them by hand.
+    ignore:
+      - dependency-name: postgres
+        update-types: [version-update:semver-major]
+      - dependency-name: redis
+        update-types: [version-update:semver-major]
+    groups:
+      compose-images:
+        patterns: ['*']

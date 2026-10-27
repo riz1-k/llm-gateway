@@ -101,6 +101,13 @@ export {
 } from './resilience/circuit-breaker.js';
 export { PromMetrics, noopMetrics, type GatewayMetrics } from './observability/metrics.js';
 export { createLogger, type Logger } from './observability/logger.js';
+export {
+  startTracing,
+  TRACE_ID_HEADER,
+  TRACER_NAME,
+  type StartTracingOptions,
+  type TracingHandle,
+} from './observability/tracing.js';
 export { computeCost, estimateCost, formatUsd, type CostBreakdown } from './usage/pricing.js';
 
 // --- Platform layer (Redis + Postgres) ---------------------------------------------------------

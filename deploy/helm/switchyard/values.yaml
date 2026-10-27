@@ -69,6 +69,24 @@ secrets:
 # -- Extra (non-secret) environment variables for every Switchyard container.
 env: {}
 
+# OpenTelemetry tracing of the API pods (docs/OBSERVABILITY.md § Tracing). When enabled, the chart
+# sets `observability.otel.enabled: true` in the rendered config and the standard OTEL_* variables
+# below. Values written under `config.observability.otel` win over these variables.
+tracing:
+  # -- Export traces over OTLP/HTTP.
+  enabled: false
+  # -- OTLP/HTTP base URL of a collector or Tempo, e.g. http://tempo.observability:4318
+  # (OTEL_EXPORTER_OTLP_ENDPOINT). Empty: the SDK default http://localhost:4318.
+  endpoint: ''
+  # -- Share of new traces to record, 0–1 (OTEL_TRACES_SAMPLER=parentbased_traceidratio). A
+  # caller's sampled `traceparent` is always honoured.
+  sampleRatio: 1
+  # -- `service.name` (OTEL_SERVICE_NAME). Empty: switchyard.
+  serviceName: ''
+  # -- Extra resource attributes (OTEL_RESOURCE_ATTRIBUTES). `k8s.namespace.name` and
+  # `k8s.pod.name` are always added.
+  resourceAttributes: {}
+
 serviceAccount:
   create: true
   name: ''

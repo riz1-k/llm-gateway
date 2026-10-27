@@ -47,7 +47,7 @@ Durations are in milliseconds (`*_ms`) or seconds (`*_s`), and money is in USD.
 | `budgets`       | object                    |              | Team budgets (need Redis + Postgres).                                       |
 | `usage`         | object                    |              | Usage pipeline (Redis stream → worker → Postgres).                          |
 | `metrics`       | object                    |              | Prometheus metrics (see docs/METRICS.md).                                   |
-| `observability` | object                    |              | Logging.                                                                    |
+| `observability` | object                    |              | Logging and tracing.                                                        |
 
 ## Server: `server`
 
@@ -362,13 +362,17 @@ Prometheus metrics (see docs/METRICS.md).
 
 ## Logging and observability: `observability`
 
-Logging.
+Logging and tracing.
 
-| Key                           | Type                                                                                   | Default  | Description                                                                  |
-| ----------------------------- | -------------------------------------------------------------------------------------- | -------- | ---------------------------------------------------------------------------- |
-| `observability.log_level`     | `"fatal"` \| `"error"` \| `"warn"` \| `"info"` \| `"debug"` \| `"trace"` \| `"silent"` | `"info"` | pino log level.                                                              |
-| `observability.log_bodies`    | boolean                                                                                | `false`  | Reserved: prompt/response body logging is not implemented yet.               |
-| `observability.metrics`       | boolean                                                                                | `true`   | Legacy switch; metrics are on only when this and `metrics.enabled` are true. |
-| `observability.otel`          | object                                                                                 |          | Reserved: OpenTelemetry tracing is not implemented yet.                      |
-| `observability.otel.enabled`  | boolean                                                                                | `false`  | Reserved.                                                                    |
-| `observability.otel.endpoint` | string \| null                                                                         |          | Reserved.                                                                    |
+| Key                                      | Type                                                                                   | Default  | Description                                                                                                                                                                                 |
+| ---------------------------------------- | -------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `observability.log_level`                | `"fatal"` \| `"error"` \| `"warn"` \| `"info"` \| `"debug"` \| `"trace"` \| `"silent"` | `"info"` | pino log level.                                                                                                                                                                             |
+| `observability.log_bodies`               | boolean                                                                                | `false`  | Reserved: prompt/response body logging is not implemented yet. Traces never carry bodies.                                                                                                   |
+| `observability.metrics`                  | boolean                                                                                | `true`   | Legacy switch; metrics are on only when this and `metrics.enabled` are true.                                                                                                                |
+| `observability.otel`                     | object                                                                                 |          | OpenTelemetry tracing (docs/OBSERVABILITY.md § Tracing). Config values win over `OTEL_*` variables.                                                                                         |
+| `observability.otel.enabled`             | boolean                                                                                | `false`  | Start the OpenTelemetry SDK and export traces over OTLP/HTTP (`switchyard serve`). `OTEL_SDK_DISABLED=true` forces it off.                                                                  |
+| `observability.otel.endpoint`            | string \| null                                                                         |          | OTLP/HTTP base URL, e.g. `http://127.0.0.1:4318` (`/v1/traces` is appended). Unset: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, then `OTEL_EXPORTER_OTLP_ENDPOINT`, then `http://localhost:4318`. |
+| `observability.otel.headers`             | map of string                                                                          |          | Headers sent with every export (e.g. collector auth). Merged over `OTEL_EXPORTER_OTLP_HEADERS`.                                                                                             |
+| `observability.otel.service_name`        | string                                                                                 |          | `service.name` resource attribute. Unset: `OTEL_SERVICE_NAME`, then `switchyard`.                                                                                                           |
+| `observability.otel.sample_ratio`        | number (≥ 0, ≤ 1)                                                                      |          | Share of new traces (requests without a sampled parent) to record. A caller's `traceparent` decision always wins. Unset: `OTEL_TRACES_SAMPLER`/`OTEL_TRACES_SAMPLER_ARG`, then 1.           |
+| `observability.otel.resource_attributes` | map of string                                                                          |          | Extra resource attributes (e.g. `deployment.environment.name`). Merged over `OTEL_RESOURCE_ATTRIBUTES`.                                                                                     |

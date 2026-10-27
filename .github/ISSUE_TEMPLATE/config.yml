@@ -1,8 +1,8 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/riz1-k/llm-gateway/security/advisories/new
-    about: Please report security issues privately.
+    url: https://github.com/riz1-k/llm-gateway/blob/main/SECURITY.md
+    about: Please don't open a public issue. Report privately as described in SECURITY.md (private vulnerability reporting).
   - name: Documentation
     url: https://github.com/riz1-k/llm-gateway#readme
     about: Configuration reference, library guide, deployment and architecture docs.

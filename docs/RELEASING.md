@@ -1,7 +1,8 @@
 # Releasing
 
 Releases are automated with [Changesets](https://github.com/changesets/changesets) and GitHub
-Actions. A release produces:
+Actions. A release produces the artifacts below; the container image is also signed with cosign
+(keyless):
 
 | Artifact                                                                                                          | Where                          | Auth                                                                  |
 | ----------------------------------------------------------------------------------------------------------------- | ------------------------------ | --------------------------------------------------------------------- |
@@ -34,7 +35,9 @@ Actions. A release produces:
      `@riz1-k/switchyard-gateway` to GitHub Packages;
    - **docker** calls `docker.yml` (as a reusable workflow, because tags pushed with
      `GITHUB_TOKEN` do not trigger other workflows) to build and push the multi-arch image
-     tagged `<version>`, `<major>.<minor>` and `latest`.
+     tagged `<version>`, `<major>.<minor>` and `latest`, then signs it with cosign. The
+     certificate identity is `docker.yml` (the reusable workflow), with the workflow name
+     `Release`; see [DEPLOYMENT.md](DEPLOYMENT.md#verifying-the-image) for the verify commands.
 
 Every action is pinned to a commit SHA, each job gets only the permissions it needs, and the
 publish job runs in the `npm` environment, where you can add required reviewers as an approval

@@ -176,5 +176,15 @@ metrics:
   default_metrics: true # prom-client Node.js process metrics
 observability:
   log_level: info # fatal | error | warn | info | debug | trace | silent
-  log_bodies: false # prompts/completions are never logged unless enabled
+  log_bodies: false # reserved; prompts/completions are never logged or traced
   metrics: true
+  # OpenTelemetry tracing (docs/OBSERVABILITY.md § Tracing). Values set here win over the standard
+  # OTEL_* variables (OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_SERVICE_NAME, OTEL_TRACES_SAMPLER_ARG, …),
+  # which fill in whatever is left unset. OTEL_SDK_DISABLED=true turns tracing off.
+  otel:
+    enabled: false
+    # endpoint: http://127.0.0.1:4318 # OTLP/HTTP base URL; /v1/traces is appended
+    # headers: { authorization: 'Bearer ${OTLP_TOKEN}' }
+    # service_name: switchyard
+    # sample_ratio: 0.1 # new traces only; a sampled incoming traceparent is always honoured
+    # resource_attributes: { deployment.environment.name: production }

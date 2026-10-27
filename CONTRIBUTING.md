@@ -2,7 +2,8 @@
 
 Thanks for helping! Bug reports, docs fixes, new provider adapters and performance work are all
 welcome. For larger changes, such as a new subsystem, a config format change or a new
-dependency, please open an issue first so we can agree on the approach.
+dependency, please open an issue first so we can agree on the approach. Everyone taking part
+is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Development setup
 
