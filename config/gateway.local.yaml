@@ -140,9 +140,9 @@ routes:
     timeout_ms: 120000
     cache: { exact: { ttl_s: 86400 } }
   docsqa-judge:
-    description: Eval judge (Sonnet, reasoning medium)
-    targets: [copilot-sonnet]
-    defaults: { reasoning_effort: medium }
+    description: Eval judge (Copilot Haiku 4.5 — cheaper premium multiplier; Sonnet as fallback)
+    targets: [copilot-haiku, copilot-sonnet]
+    retry: { attempts: 2, backoff_ms: 500, max_backoff_ms: 4000 }
     timeout_ms: 240000
     cache: { exact: { ttl_s: 604800 } }
   docsqa-embed:
@@ -160,9 +160,9 @@ routes:
     timeout_ms: 240000
     cache: { exact: { ttl_s: 3600 } }
   opsagent-judge:
-    description: OpsAgent eval judge (Sonnet, reasoning medium)
-    targets: [copilot-sonnet]
-    defaults: { reasoning_effort: medium }
+    description: OpsAgent eval judge (Copilot Haiku 4.5 — cheaper premium multiplier; Sonnet as fallback)
+    targets: [copilot-haiku, copilot-sonnet]
+    retry: { attempts: 2, backoff_ms: 500, max_backoff_ms: 4000 }
     timeout_ms: 240000
     cache: { exact: { ttl_s: 604800 } }
   mock-chat:
