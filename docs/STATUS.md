@@ -309,9 +309,15 @@ Deployment and observability are built and verified end to end. See
 
 CI hardening:
 
-- Workflow-level `permissions: contents: read`. Only the push job in `docker.yml` gets
-  `packages: write`, `id-token: write` and `attestations: write`.
-- No `pull_request_target`. Every action is pinned by commit SHA.
+- Workflow-level `permissions` are `contents: read` or `{}`. Write grants are per job: the push
+  job in `docker.yml` (`packages`, `id-token`, `attestations`), the release jobs, and
+  `security-events: write` (plus `id-token: write` for Scorecard publishing) in the scanners.
+- No `pull_request_target`. Every action is pinned by commit SHA, and CI service images by digest.
+- actionlint (with shellcheck) and zizmor run in CI; accepted zizmor findings carry an inline
+  `# zizmor: ignore[...]` with the reason.
+- Supply chain: `docker.yml` signs every pushed image with cosign (keyless, GitHub OIDC);
+  `codeql.yml` scans javascript-typescript and actions; `scorecard.yml` publishes OpenSSF
+  Scorecard results; Dependabot opens monthly, grouped updates for npm, actions and images.
 - `persist-credentials: false` on checkouts.
 
 ### Verification (2026-10-27)
@@ -427,10 +433,10 @@ heavy-docker lock and torn down afterwards.
   backend.
 - **No Alertmanager** in compose or in the kind small-footprint profile. Alerts are visible in
   Prometheus and Grafana only.
-- **No signing of the published image** (cosign). GitHub build-provenance attestations and an
-  SBOM are generated.
-- **The GitHub workflows have not run on GitHub yet.** No push was made; they pass actionlint
-  and every step was exercised locally.
+- **Image signing is unproven on GitHub.** `docker.yml` signs every pushed image with cosign
+  (keyless, GitHub OIDC) and verifies it in the same job, but no image has been pushed yet.
+- **Workflows on GitHub:** CI, Docker image and Release have run green on GitHub since 2026-10-27 (the opt-in
+  release stops at a notice until `RELEASE_ENABLED` is set; see RELEASING.md).
 - **Prometheus cost counters reset on pod restart.** `increase()` handles that, but long-range
   cost questions should use the Postgres panels.
 - **`terraform.tfstate` for local-kind is local** (gitignored). It contains generated passwords

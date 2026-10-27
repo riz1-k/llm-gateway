@@ -9,10 +9,9 @@
 # Build (from the repository root):
 #   docker build -f deploy/docker/Dockerfile -t switchyard:dev .
 
-ARG NODE_VERSION=24.22.1
-
 # ── base: Node + the pnpm version pinned in package.json#packageManager (via corepack) ──────────
-FROM node:${NODE_VERSION}-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS base
+# The tag is written out (no ARG) so Dependabot can bump the tag and digest together.
+FROM node:24.22.1-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS base
 ENV CI=true \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
     PNPM_STORE=/pnpm/store

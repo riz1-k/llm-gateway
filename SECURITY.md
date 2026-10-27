@@ -53,6 +53,12 @@ The following are especially relevant:
   (`config/gateway.local.yaml`, `deploy/docker/docker-compose.yml`). They bind to `127.0.0.1` and
   are documented as dev-only.
 
+## Verifying artifacts
+
+Container images are signed with cosign (keyless, GitHub OIDC) and carry SBOM and SLSA
+build-provenance attestations; npm releases are published with provenance. Verification
+commands: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#verifying-the-image).
+
 ## Hardening notes
 
 See [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md) for the threat model, the last review's
