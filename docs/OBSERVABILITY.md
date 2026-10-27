@@ -83,6 +83,41 @@ limited to 5 RPM, a 30 %-flaky primary and a 60 %-throttled primary. A kind run 
 dashboard is in `observability/screenshots/switchyard-cost-kind.png`. To regenerate them, run
 `make screenshots GRAFANA_URL=…`, which needs `uv` and Chrome (`capture.py --help`).
 
+### From the dev gateway (real traffic, 2026-10-27)
+
+The `dev-*` screenshots are the same dashboards against the gateway that serves the portfolio's
+other two projects, [DocsQA](https://github.com/riz1-k/docsqa) and
+[OpsAgent](https://github.com/riz1-k/opsagent), over one hour (20:22–21:22 IST) of their real
+traffic: DocsQA personas through its API (streamed and sync, including exact-cache replays of
+earlier Copilot answers), OpsAgent operator runs with approvals, and DocsQA eval runs as the
+`evals` team. Per-team cost shows all three teams, each against its monthly budget.
+
+| Overview                                                                   | Cost & budgets                                                     | Providers & reliability                                                      |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| ![Overview, dev](../observability/screenshots/dev-switchyard-overview.png) | ![Cost, dev](../observability/screenshots/dev-switchyard-cost.png) | ![Providers, dev](../observability/screenshots/dev-switchyard-providers.png) |
+
+How to read them:
+
+- Copilot-served models are priced at **shadow** list prices (Copilot is flat-rate), and the
+  deterministic `mock-extractive` model used for quota-free traffic carries a demo price
+  ($0.50 / $1.50 per 1M tokens in `config/pricing.json`), so most of the spend in that hour is
+  mock traffic; "Spend by model" separates it from the Copilot rows.
+- Most OpsAgent traffic used its scripted model (a $0 local route), plus one real
+  `opsagent-chat` run (2 Copilot calls). DocsQA's spend is mock traffic plus two Claude Haiku
+  condense calls; its Copilot answers were exact-cache hits, which is why cache savings show.
+- Fallbacks, retries, 429/5xx and rejections are empty because nothing failed in that hour; the
+  failure-mode tests ran earlier with scratch teams. The hole in the breaker timeline and the
+  process panels around 20:43–20:55 is missing Prometheus samples, not a gateway outage.
+
+To reproduce against a gateway running on this host (Linux; Prometheus on :9092 and Grafana on
+:3302, both host-networked):
+
+```bash
+make observe-host-up
+make screenshots GRAFANA_URL=http://127.0.0.1:3302 SCREENSHOT_ARGS="--prefix=dev- --range now-1h"
+make observe-host-down   # deletes the stack's volumes
+```
+
 ## Alerts
 
 `observability/prometheus/alerts.yml` defines three recording rules and eight alerts. Compose

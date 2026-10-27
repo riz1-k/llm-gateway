@@ -629,11 +629,13 @@ See [Release (wave M)](#release-wave-m). Follow-ups for later waves:
 - **Benchmarks** are sensitive to background load on this shared laptop; re-run `make bench` on
   a quiet machine before quoting numbers outside this repo.
 
-## Cross-project (O) — paused
+## Cross-project (O)
 
-Paused 2026-10-27 ~16:25 IST on the user's request (stop at the next safe point). Everything below was
-verified by the orchestrator (checks + leakscan) and committed: llm-gateway 1df5bf9, docsqa 5db0807,
-opsagent fc10a46.
+Complete. Wave O did scope 1–4 and the failure matrix, then paused 2026-10-27 ~16:25 IST on the user's
+request (committed: llm-gateway 1df5bf9, docsqa 5db0807, opsagent fc10a46). O2 finished scope 5–9 on
+2026-10-27 20:23–21:40 IST: dev dashboards, failure modes in the consumer docs, Dogfooding, the shared
+portfolio README section and the STATUS entries ([O2 results](#o2-dashboards-dogfooding-portfolio-story)).
+This section stays the cross-project source (failure matrix, traffic, queries).
 
 ### Done (brief O scope numbers)
 
@@ -683,18 +685,15 @@ usage_events where provider='copilot' and cache='miss' and ts > '2026-10-27 15:0
   docsqa/docsqa-chat 4, docsqa/docsqa-fast 1, evals/docsqa-chat 2, evals/docsqa-judge 2,
   opsagent/opsagent-chat 3) — 8 left of O's 20.
 
-### Pending (to resume)
+### Pending at the pause (all done by O2)
 
-- **5** screenshots `observability/screenshots/dev-*.png` (Cost & Budgets, Overview, Providers): Prometheus data
-  was deleted with `down -v`, so re-run `make observe-host-up`, generate a little fresh traffic (the scripts in
-  the traffic list above; free routes), then `make screenshots GRAFANA_URL=http://127.0.0.1:3302 SCREENSHOT_ARGS="--prefix=dev- --range now-1h"`
-  (build lock — it is a Playwright run). Also record `GET /admin/teams/:id/budget` and Prometheus
-  `sy_cost_usd_total{team}` outputs.
-- **6** document the matrix above in docsqa/opsagent docs (only here so far).
-- **7** Dogfooding section in the gateway README (`GET /admin/usage?group_by=team|route|model|provider`).
+- **5** dev Grafana screenshots + budget/Prometheus outputs → [O2 results](#o2-dashboards-dogfooding-portfolio-story).
+- **6** failure matrix in the docsqa and opsagent docs → their `docs/DEPLOYMENT.md` "Failure modes at the gateway boundary".
+- **7** Dogfooding section in the gateway README.
 - **8** "Part of a three-project portfolio" section in all three READMEs.
-- **9** STATUS entries in docsqa and opsagent (change lists below).
-- `usage_daily` is maintained by the in-process writer (`usage.in_process_writer: true`): no worker needed.
+- **9** STATUS entries in docsqa and opsagent.
+- `usage_daily` is maintained by the in-process writer (`usage.in_process_writer: true`): no worker needed
+  (re-checked by O2: `sum(requests)` in `usage_daily` = 2,658 = `count(*)` of `usage_events`).
 
 ### Changes per repo (commits 1df5bf9 / 5db0807 / fc10a46)
 
@@ -722,3 +721,234 @@ usage_events where provider='copilot' and cache='miss' and ts > '2026-10-27 15:0
   `scripts/seed-portfolio.sh` after a DB reset.
 - Scratch teams `o-scratch`, `o-ratelimit` are soft-deleted (slugs reserved, usage rows kept).
 - The opsagent dev store was reset twice (`pnpm reset`) for the traffic runs.
+
+### O2: dashboards, dogfooding, portfolio story
+
+O2 ran 2026-10-27 20:23–21:40 IST against the stable gateway (d9db543, restarted ~20:13, so its
+Prometheus counters start then).
+
+**Traffic session** (scripts from O: DocsQA API driver with personas, OpsAgent Agent API driver with
+approvals; servers on 127.0.0.1:8011 / 8100 / 8200 / 8300, all stopped afterwards):
+
+- DocsQA, team `docsqa`, `mock-chat`: 5 rounds × 54 turns (4 personas × 12 questions + follow-ups, ⅔
+  streamed). The follow-ups condense through `docsqa-fast` (real Claude Haiku): 2 cache misses in the
+  first round, cache hits afterwards.
+- DocsQA, team `docsqa`, `docsqa-chat`: O's "real" plan replayed (5 turns), all exact-cache hits
+  ($0.0668 saved, 0 upstream calls).
+- Evals, team `evals`: DocsQA offline tier twice (39/50 both times, = O's run and the baseline) and
+  full tier `--ids q001,q002` (2/2; chat from the gateway's exact cache, verdicts from DocsQA's judge
+  cache; 0 upstream calls).
+- OpsAgent, team `opsagent`: the 7 scripted scenarios (3 with approval decisions incl. a senior approval
+  and a reject) through the hidden `opsagent-scripted` route, 5 times (the opsagent dev store was reset
+  with `pnpm reset` before each), plus one real `opsagent-chat` run ("What's the
+  status of ORD-20004?", 2 calls, 2 tool calls). Its `run_finished.cost_usd` 0.02415
+  (`cost_source: gateway`) = `sum(cost_usd)` of its two `usage_events` rows (0.0241497).
+- The 2 `mock-tools` rows at 21:27 are the opsagent agent test suite (`make agent-test`), not traffic.
+
+Session by team/route/cache (`select team, route, provider, cache, count(*), sum(cost_usd), sum(saved_usd)
+from usage_events where ts > '2026-10-27 20:22:57+05:30' group by 1,2,3,4`):
+
+```text
+   team   |       route       | provider | cache  | count |   cost   |  saved
+----------+-------------------+----------+--------+-------+----------+----------
+ docsqa   | docsqa-chat       | copilot  | hit    |     5 | 0.000000 | 0.066847
+ docsqa   | docsqa-embed      | local    | hit    |   526 | 0.000000 | 0.000000
+ docsqa   | docsqa-embed      | local    | miss   |     4 | 0.000000 | 0.000000
+ docsqa   | docsqa-fast       | copilot  | hit    |    29 | 0.000000 | 0.012719
+ docsqa   | docsqa-fast       | copilot  | miss   |     2 | 0.000858 | 0.000000
+ docsqa   | mock-chat         | mock     | bypass |   250 | 0.327880 | 0.000000
+ evals    | docsqa-chat       | copilot  | hit    |     2 | 0.000000 | 0.019178
+ evals    | docsqa-embed      | local    | hit    |   188 | 0.000000 | 0.000000
+ evals    | mock-chat         | mock     | bypass |    92 | 0.101560 | 0.000000
+ opsagent | mock-tools        | mock     | bypass |     2 | 0.002225 | 0.000000
+ opsagent | opsagent-chat     | copilot  | miss   |     2 | 0.024150 | 0.000000
+ opsagent | opsagent-scripted | local    | bypass |    90 | 0.000000 | 0.000000
+(12 rows)
+```
+
+**Copilot upstream calls used by O2: 4** (2 `docsqa-fast` condense calls, 2 `opsagent-chat`); O + O2 = 16
+of the 20 planned for the wave.
+
+```text
+$ PGPASSWORD=dev psql -h localhost -U dev -d llmgateway -c "select team,route,count(*) from usage_events where provider='copilot' and cache='miss' and ts > '2026-10-27 20:22:57+05:30' group by 1,2"
+   team   |     route     | count
+----------+---------------+-------
+ docsqa   | docsqa-fast   |     2
+ opsagent | opsagent-chat |     2
+(2 rows)
+```
+
+**Screenshots** (`make observe-host-up`, then under the build lock
+`make screenshots GRAFANA_URL=http://127.0.0.1:3302 SCREENSHOT_ARGS="--prefix=dev- --range now-1h"` at
+21:22; each PNG opened and checked):
+
+- `observability/screenshots/dev-switchyard-cost.png`: spend $0.3206 and cache savings $0.0110 in the hour,
+  month-to-date $2.2538, spend rate by team / route / provider-model with all three teams, budget gauges
+  docsqa 1.0 % / evals 1.0 % / opsagent 1.5 %, the budget table ($0.4864 / $1.0209 / $0.7465 of
+  $50 / $100 / $50), top keys (`portfolio-docsqa` 816, `portfolio-evals` 282, `portfolio-opsagent` 92
+  requests), spend by model.
+- `observability/screenshots/dev-switchyard-overview.png`: requests/s by route, all 200s, p50/p95/p99,
+  TTFT for docsqa-chat / mock-chat / opsagent-chat / opsagent-scripted, cache hit ratio by route,
+  tokens/s, process memory and CPU.
+- `observability/screenshots/dev-switchyard-providers.png`: upstream latency per provider/model (Copilot
+  Sonnet and Haiku, local embeddinggemma, mock), attempts by outcome (all ok), all breakers closed;
+  fallbacks / retries / 429-5xx panels are empty (nothing failed in that hour).
+- Prometheus missed samples around 20:43–20:55 (visible as a hole in the breaker timeline and the
+  process panels). Documented in [OBSERVABILITY.md](OBSERVABILITY.md#from-the-dev-gateway-real-traffic-2026-10-27).
+
+**Budgets** (`GET /admin/teams/:id/budget`, admin token, 21:23 IST):
+
+```text
+GET /admin/teams/docsqa/budget
+{"team":"docsqa","as_of":"2026-10-27T15:53:28.580Z","spend":{"daily":0.4864,"monthly":0.4864,"persisted":{"daily":0.4863997,"monthly":0.4863997}},"budgets":[{"period":"monthly","period_key":"202610","period_start":"2026-10-01T00:00:00.000Z","period_end":"2026-11-01T00:00:00.000Z","limit_usd":50,"spent_usd":0.4864,"remaining_usd":49.5136,"utilization":0.0097,"projected_usd":0.565536,"projected_utilization":0.0113,"soft_threshold":0.8,"action":"block","status":"ok"}]}
+GET /admin/teams/opsagent/budget
+{"team":"opsagent","as_of":"2026-10-27T15:53:28.591Z","spend":{"daily":0.74645,"monthly":0.74645,"persisted":{"daily":0.7464502,"monthly":0.7464502}},"budgets":[{"period":"monthly","period_key":"202610","period_start":"2026-10-01T00:00:00.000Z","period_end":"2026-11-01T00:00:00.000Z","limit_usd":50,"spent_usd":0.74645,"remaining_usd":49.25355,"utilization":0.0149,"projected_usd":0.867896,"projected_utilization":0.0174,"soft_threshold":0.8,"action":"block","status":"ok"}]}
+GET /admin/teams/evals/budget
+{"team":"evals","as_of":"2026-10-27T15:53:28.603Z","spend":{"daily":1.020902,"monthly":1.020902,"persisted":{"daily":1.0209019,"monthly":1.0209019}},"budgets":[{"period":"monthly","period_key":"202610","period_start":"2026-10-01T00:00:00.000Z","period_end":"2026-11-01T00:00:00.000Z","limit_usd":100,"spent_usd":1.020902,"remaining_usd":98.979098,"utilization":0.0102,"projected_usd":1.187,"projected_utilization":0.0119,"soft_threshold":0.8,"action":"block","status":"ok"}]}
+```
+
+**Prometheus** (`GET :9092/api/v1/query`, 21:23 IST; counters since the gateway restart):
+
+```text
+## sum by (team) (sy_cost_usd_total)
+  {'team': 'docsqa'} 0.3287379999999998
+  {'team': 'evals'} 0.10156000000000003
+  {'team': 'opsagent'} 0.0241497
+## sum by (team) (sy_tokens_total)
+  {'team': 'docsqa'} 638790
+  {'team': 'opsagent'} 381373
+  {'team': 'evals'} 194904
+## sum by (team) (sy_cache_saved_usd_total)
+  {'team': 'docsqa'} 0.07956619999999999
+  {'team': 'evals'} 0.0191783
+## sum by (team, provider) (sy_cost_usd_total)
+  {'provider': 'mock', 'team': 'docsqa'} 0.3278799999999998
+  {'provider': 'copilot', 'team': 'docsqa'} 0.000858
+  {'provider': 'mock', 'team': 'evals'} 0.10156000000000003
+  {'provider': 'copilot', 'team': 'opsagent'} 0.0241497
+## max by (team, period) (sy_budget_utilization_ratio)
+  {'period': 'monthly', 'team': 'docsqa'} 0.009727994
+  {'period': 'monthly', 'team': 'opsagent'} 0.014929004
+  {'period': 'monthly', 'team': 'evals'} 0.010209019
+## sum by (team) (increase(sy_cost_usd_total[1h]))
+  {'team': 'docsqa'} 0.2632481375367109
+  {'team': 'evals'} 0.05097021372231591
+  {'team': 'opsagent'} 0.00622055928141753
+```
+
+**observe-host stack**: `make observe-host-down` (volumes **dropped**); the two images it pulled
+(prom/prometheus v3.15.1, grafana/grafana 13.2.4, ≈ 2.3 GB) were removed afterwards to keep the disk
+above 11 GB. Heavy and build locks released.
+
+**Dogfooding queries** (21:24 IST; the ledger starts at the first recorded request, 2026-10-27 11:02:08
+IST, and the last one counted is 21:22:34 IST; all on the UTC day 2026-10-27, so `from=2026-10-01&to=2026-10-27`
+covers everything):
+
+```bash
+for g in team route model provider; do
+  curl -s "http://127.0.0.1:8787/admin/usage?group_by=$g&from=2026-10-01&to=2026-10-27" -H "Authorization: Bearer $SWITCHYARD_ADMIN_TOKEN"
+done
+```
+
+```text
+group_by=team  (query {"from": "2026-10-01", "to": "2026-10-27", "groupBy": "team"})
+group                requests errors cache_hits prompt_tok compl_tok   cost_usd saved_usd
+evals                    1225      0        680     921313     53198  1.0209019 0.0859641
+opsagent                  294      1          2    1395851     55452  0.7464502 0.0231822
+docsqa                   1108      1        704     843452     14694  0.4863997 0.0897517
+o-ratelimit                21     12          2       2940        75  0.0014945 0.0000000
+o-scratch                  10      7          1         36         0  0.0000000 0.0000000
+
+group_by=route  (query {"from": "2026-10-01", "to": "2026-10-27", "groupBy": "route"})
+group                requests errors cache_hits prompt_tok compl_tok   cost_usd saved_usd
+mock-chat                 644      4          0    1444203     25546  0.7604205 0.0000000
+opsagent-chat             116      0          2     847473     24410  0.5478377 0.0231822
+docsqa-chat                68      2         14     171785     13232  0.4794761 0.1539588
+docsqa-judge               79      0          2     121661     29140  0.2673610 0.0090380
+opsagent-judge             40      0          0      66645     21055  0.1719200 0.0000000
+mock-tools                 26      2          0      51604       576  0.0266660 0.0000000
+docsqa-fast                32      0         29       1275        58  0.0015650 0.0127190
+docsqa-embed             1542     12       1342      28843         0  0.0000000 0.0000000
+opsagent-scripted         111      1          0     430103      9402  0.0000000 0.0000000
+
+group_by=model  (query {"from": "2026-10-01", "to": "2026-10-27", "groupBy": "model"})
+group                requests errors cache_hits prompt_tok compl_tok   cost_usd saved_usd
+claude-sonnet-5.5         182      0         16    1019258     37642  1.0273138 0.1771410
+mock-extractive           640      0          0    1444203     25546  0.7604205 0.0000000
+claude-haiku-4.5          151      0         31     189581     50253  0.4408460 0.0217570
+mock-tools                 24      0          0      51604       576  0.0266660 0.0000000
+embeddinggemma-300m      1531      1       1342      28843         0  0.0000000 0.0000000
+opsagent-scripted         110      0          0     430103      9402  0.0000000 0.0000000
+(none)                     20     20          0          0         0  0.0000000 0.0000000
+
+group_by=provider  (query {"from": "2026-10-01", "to": "2026-10-27", "groupBy": "provider"})
+group                requests errors cache_hits prompt_tok compl_tok   cost_usd saved_usd
+copilot                   333      0         47    1208839     87895  1.4681598 0.1988980
+mock                      664      0          0    1495807     26122  0.7870865 0.0000000
+local                    1641      1       1342     458946      9402  0.0000000 0.0000000
+(none)                     20     20          0          0         0  0.0000000 0.0000000
+
+totals: {"requests": 2658, "errors": 21, "cache_hits": 1389, "prompt_tokens": 3163592, "cached_tokens": 790383, "completion_tokens": 123419, "reasoning_tokens": 1812, "cost_usd": 2.2552463, "saved_usd": 0.198898}
+```
+
+The admin usage API has no fallback column, so fallbacks come from the ledger:
+
+```text
+$ psql … -c "select min(ts) first, max(ts) last, count(*) requests, sum(fallbacks) fallbacks, count(*) filter (where fallbacks>0) requests_with_fallback, sum(cost_usd) from usage_events" \
+          -c "select team, count(*) filter (where fallbacks>0), sum(fallbacks) from usage_events group by 1" \
+          -c "select route, provider, model, fallbacks, count(*) from usage_events where fallbacks>0 group by 1,2,3,4" \
+          -c "select sum(requests) daily_requests from usage_daily"
+             first             |             last             | requests | fallbacks | requests_with_fallback | cost_usd
+-------------------------------+------------------------------+----------+-----------+------------------------+----------
+ 2026-10-27 11:02:08.341+05:30 | 2026-10-27 21:22:34.96+05:30 |     2658 |         0 |                      0 | 2.255246
+(1 row)
+
+    team     | req_with_fallback | fallbacks
+-------------+-------------------+-----------
+ docsqa      |                 0 |         0
+ evals       |                 0 |         0
+ opsagent    |                 0 |         0
+ o-ratelimit |                 0 |         0
+ o-scratch   |                 0 |         0
+(5 rows)
+
+ route | provider | model | fallbacks | count
+-------+----------+-------+-----------+-------
+(0 rows)
+
+ daily_requests
+----------------
+           2658
+(1 row)
+```
+
+Errors in the ledger (`status >= 400`): o-ratelimit 12 × 429, o-scratch 7 × 402 (O's failure tests),
+docsqa 1 × 499 `request_aborted` (embeddings, client disconnect), opsagent 1 × 502 on `opsagent-scripted`
+at 14:57 (scripted server not running). The README table derives tokens = prompt + completion and cache
+hit ratio = cache_hits / requests from these rows.
+
+**Changes by O2:**
+
+- **llm-gateway**: `README.md` (link to the dev screenshots under Observability, new **Dogfooding**
+  section after Benchmarks, **Part of a three-project portfolio** section before License),
+  `docs/OBSERVABILITY.md` ("From the dev gateway" subsection with the three `dev-*` screenshots, how to
+  read them and how to reproduce), `observability/screenshots/dev-switchyard-{overview,cost,providers}.png`
+  (new), this section (renamed from "Cross-project (O) — paused").
+- **docsqa**: `docs/DEPLOYMENT.md` ("Failure modes at the gateway boundary": 402 / 429 / gateway down,
+  before/after, link to the gateway error contract), `README.md` (configuration row for
+  `LLM_API_KEY`/`EVAL_JUDGE_API_KEY` with `seed-portfolio.sh`, portfolio section at the end),
+  `docs/STATUS.md` (cross-project section). `.env.example` already mentioned the script.
+- **opsagent**: `docs/DEPLOYMENT.md` (same failure-modes subsection; the `LLM_PRICE_*` paragraph now says
+  run cost comes from the gateway, `cost_source: gateway`), `docs/ARCHITECTURE.md` (the "LLM gateway
+  errors" row names the gateway codes and links the subsection), `agent/.env.example` (`seed-portfolio.sh`
+  comment, `EVAL_LLM_API_KEY=`), `README.md` (configuration row for the keys, portfolio section at the end),
+  `docs/STATUS.md` (cross-project section). No code, prompt, model-input or eval-baseline changes in any
+  repo, so the OpsAgent replay tier is unaffected.
+
+**Checks (O2, after the changes):** llm-gateway `pnpm typecheck` (exit 0) and `pnpm lint` (eslint +
+`prettier --check .`: "All matched files use Prettier code style!"); docsqa `make check`: ruff "All checks
+passed!", mypy "no issues found in 89 source files", **422 passed, 3 skipped**; opsagent
+`make agent-lint agent-test`: ruff clean, mypy "no issues found in 69 source files", **114 passed**;
+`devenv/bin/leakscan.sh` clean on all three (356 / 429 / 482 files + history).
+
+**Left running:** nothing (servers killed by port, observe-host down, locks released).
