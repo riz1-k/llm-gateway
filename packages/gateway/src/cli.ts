@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { startMockServer } from '@switchyard/mock-provider';
 import {
@@ -12,6 +13,7 @@ import {
   cmdUsage,
   cmdWorker,
 } from './cli/commands.js';
+import { writeStarterFiles } from './cli/init.js';
 import { ConfigError, loadConfig } from './config/load.js';
 import { GatewayError } from './core/errors.js';
 import { startServer } from './server.js';
@@ -19,10 +21,11 @@ import { startServer } from './server.js';
 const HELP = `switchyard — OpenAI-compatible LLM gateway
 
 Usage:
-  switchyard serve --config <file> [--port <n>] [--host <addr>]
-  switchyard worker --config <file> [--port <metrics-port>]
-  switchyard migrate --config <file> | --database-url <url>
-  switchyard validate-config <file>
+  switchyard init [--dir <path>] [--force]
+  switchyard serve [--config <file>] [--port <n>] [--host <addr>]
+  switchyard validate-config [<file> | --config <file>]
+  switchyard worker [--config <file>] [--port <metrics-port>]
+  switchyard migrate [--config <file>] [--database-url <url>]
   switchyard mock-provider [--port 8790] [--host 127.0.0.1] [--latency-ms <n>] [--fail-rate <0..1>] [--fail-status <code>] [--seed <n>]
 
 Admin (local: --config <file> talks to Postgres/Redis directly;
@@ -40,8 +43,57 @@ Admin (local: --config <file> talks to Postgres/Redis directly;
   switchyard seed-dev [--rotate] [--output <env-file>]
   (add --json to admin commands for machine-readable output)
 
-  switchyard --version | --help
+  switchyard --version | --help | <command> --help
+
+The config file defaults to $SWITCHYARD_CONFIG, then ./gateway.yaml. A ./.env file is loaded
+first when present (existing environment variables win). Docs: https://github.com/riz1-k/llm-gateway
 `;
+
+/** Usage lines of one command, taken from HELP (`switchyard <command> --help`). */
+function commandHelp(command: string): string | undefined {
+  const lines = HELP.split('\n').filter(
+    (l) => l.startsWith(`  switchyard ${command} `) || l === `  switchyard ${command}`,
+  );
+  if (lines.length === 0) return undefined;
+  return `Usage:\n${lines.join('\n')}\n\nRun \`switchyard --help\` for all commands.\n`;
+}
+
+/** --config → $SWITCHYARD_CONFIG → ./gateway.yaml (if it exists). */
+export function resolveConfigPath(flag: string | undefined): string | undefined {
+  if (flag) return flag;
+  if (process.env.SWITCHYARD_CONFIG) return process.env.SWITCHYARD_CONFIG;
+  return existsSync('gateway.yaml') ? 'gateway.yaml' : undefined;
+}
+
+const NO_CONFIG =
+  'no config file: pass --config <file>, set SWITCHYARD_CONFIG, or run `switchyard init` to create ./gateway.yaml';
+
+/** Loads ./.env (or --env-file / SWITCHYARD_ENV_FILE) without overriding the real environment. */
+function loadEnvFile(argv: string[]): string[] {
+  const rest: string[] = [];
+  let file: string | undefined = process.env.SWITCHYARD_ENV_FILE;
+  let explicit = Boolean(file);
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === '--env-file') {
+      file = argv[++i];
+      explicit = true;
+    } else if (a.startsWith('--env-file=')) {
+      file = a.slice('--env-file='.length);
+      explicit = true;
+    } else rest.push(a);
+  }
+  const path = resolve(file ?? '.env');
+  if (existsSync(path)) {
+    // process.loadEnvFile overrides existing variables; keep the real environment authoritative.
+    const before = { ...process.env };
+    process.loadEnvFile(path);
+    for (const [k, v] of Object.entries(before)) process.env[k] = v;
+  } else if (explicit) {
+    throw new Error(`env file not found: ${path}`);
+  }
+  return rest;
+}
 
 function version(): string {
   try {
@@ -62,14 +114,21 @@ const num = (v: string | undefined, name: string): number | undefined => {
 };
 
 async function main(argv: string[]): Promise<number> {
-  const [command, ...rest] = argv;
+  const [command, ...rest] = loadEnvFile(argv);
   if (!command || command === '--help' || command === '-h' || command === 'help') {
     process.stdout.write(HELP);
     return 0;
   }
-  if (command === '--version' || command === '-v') {
+  if (command === '--version' || command === '-v' || command === 'version') {
     process.stdout.write(`${version()}\n`);
     return 0;
+  }
+  if (rest.includes('--help') || rest.includes('-h')) {
+    const help = commandHelp(command);
+    if (help) {
+      process.stdout.write(help);
+      return 0;
+    }
   }
 
   switch (command) {
@@ -82,8 +141,8 @@ async function main(argv: string[]): Promise<number> {
           host: { type: 'string' },
         },
       });
-      const configPath = values.config ?? process.env.SWITCHYARD_CONFIG;
-      if (!configPath) throw new Error('serve requires --config <file> (or SWITCHYARD_CONFIG)');
+      const configPath = resolveConfigPath(values.config);
+      if (!configPath) throw new Error(NO_CONFIG);
       const port = num(values.port ?? process.env.PORT, 'port');
       await startServer({
         configPath,
@@ -93,9 +152,39 @@ async function main(argv: string[]): Promise<number> {
       });
       return -1; // keep running
     }
+    case 'init': {
+      const { values } = parseArgs({
+        args: rest,
+        options: { dir: { type: 'string', short: 'd' }, force: { type: 'boolean', short: 'f' } },
+      });
+      const r = writeStarterFiles(values.dir ?? '.', version(), values.force === true);
+      for (const f of r.written) process.stdout.write(`✔ wrote ${f}\n`);
+      for (const f of r.skipped)
+        process.stdout.write(`• kept existing ${f} (use --force to overwrite)\n`);
+      const cd = values.dir ? `cd ${values.dir} && ` : '';
+      process.stdout.write(
+        [
+          '',
+          'Next:',
+          `  ${cd}npx switchyard-gateway serve            # http://localhost:8787/v1`,
+          '  curl localhost:8787/v1/chat/completions \\',
+          "    -H 'authorization: Bearer sk-sy-local-change-me' -H 'content-type: application/json' \\",
+          '    -d \'{"model":"chat","messages":[{"role":"user","content":"hello"}]}\'',
+          '',
+          'Copy .env.example to .env and change the key before exposing the gateway.',
+          '',
+        ].join('\n'),
+      );
+      return 0;
+    }
     case 'validate-config': {
-      const file = rest[0];
-      if (!file) throw new Error('validate-config requires a file path');
+      const { values, positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: { config: { type: 'string', short: 'c' } },
+      });
+      const file = resolveConfigPath(positionals[0] ?? values.config);
+      if (!file) throw new Error(NO_CONFIG);
       const cfg = loadConfig(file);
       const routes = Object.values(cfg.routes);
       process.stdout.write(
@@ -158,9 +247,30 @@ async function main(argv: string[]): Promise<number> {
     case 'seed-dev':
       return cmdSeedDev(rest);
     default:
-      process.stderr.write(`Unknown command "${command}".\n\n${HELP}`);
+      process.stderr.write(`✖ Unknown command "${command}". Run \`switchyard --help\`.\n`);
       return 2;
   }
+}
+
+/** Actionable follow-up for common failures (bad flags, unreachable Redis/Postgres). */
+function errorHint(err: unknown, command: string | undefined): string | undefined {
+  const e = err as { code?: string; address?: string; port?: number; errors?: unknown[] };
+  const code = e.code ?? (e.errors?.[0] as { code?: string } | undefined)?.code;
+  if (code === 'ERR_PARSE_ARGS_UNKNOWN_OPTION' || code === 'ERR_PARSE_ARGS_INVALID_OPTION_VALUE')
+    return `run \`switchyard ${command ?? ''} --help\` for the accepted flags`;
+  if (code === 'ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL')
+    return `this command takes no positional arguments; see \`switchyard ${command ?? ''} --help\``;
+  if (
+    code === 'ECONNREFUSED' ||
+    code === 'ENOTFOUND' ||
+    code === 'EAI_AGAIN' ||
+    code === 'ETIMEDOUT'
+  )
+    return 'a backing service is unreachable: check that Postgres/Redis are running and that database.url / redis.url (or DATABASE_URL / REDIS_URL) point at them';
+  if (code === '28P01') return 'Postgres rejected the credentials in database.url';
+  if (code === '3D000') return 'the database in database.url does not exist; create it first';
+  if (code === '42P01') return 'tables are missing: run `switchyard migrate` first';
+  return undefined;
 }
 
 main(process.argv.slice(2)).then(
@@ -177,6 +287,8 @@ main(process.argv.slice(2)).then(
       process.exit(1);
     }
     process.stderr.write(`✖ ${err instanceof Error ? err.message : String(err)}\n`);
+    const hint = errorHint(err, process.argv[2]);
+    if (hint) process.stderr.write(`  hint: ${hint}\n`);
     process.exit(1);
   },
 );

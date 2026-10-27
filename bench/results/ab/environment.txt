@@ -1,0 +1,7 @@
+date: 2026-10-27T14:39:57+05:30
+A: /home/riz1/dev/personal/ai-portfolio/llm-gateway/packages/gateway/dist-before/cli.js
+B: /home/riz1/dev/personal/ai-portfolio/llm-gateway/packages/gateway/dist/cli.js
+rate runs: 200 req/s for 15s, order A B B A per scenario
+clock ticks per second (for gateway-cpu.txt): 100
+load average at start: 5.23 8.08 7.28
+load average at end: 10.31 8.32 7.35

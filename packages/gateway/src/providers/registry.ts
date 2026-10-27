@@ -7,6 +7,12 @@ import { OpencodeAdapter } from './opencode/index.js';
 import { OpenAIAdapter } from './openai.js';
 import { OpenAICompatibleAdapter } from './openai-compatible.js';
 
+/**
+ * Creates the adapter for one configured provider. Register factories with
+ * `createGateway({ adapterFactories: { <key>: factory } })`: the key is a built-in provider
+ * `type` (to replace that implementation) or the `factory` name of a `type: custom` provider.
+ * Called once per config snapshot (again after every reload).
+ */
 export type AdapterFactory = (
   name: string,
   config: ProviderConfig,
@@ -14,7 +20,7 @@ export type AdapterFactory = (
 ) => ProviderAdapter;
 
 /** Built-in adapter factories by provider `type`. */
-export const builtinFactories: Record<ProviderConfig['type'], AdapterFactory> = {
+export const builtinFactories: Record<Exclude<ProviderConfig['type'], 'custom'>, AdapterFactory> = {
   opencode: (name, c, deps) =>
     new OpencodeAdapter(name, c as Extract<ProviderConfig, { type: 'opencode' }>, deps),
   'openai-compatible': (name, c, deps) =>
@@ -42,7 +48,17 @@ export class ProviderRegistry {
   ) {
     for (const [name, provider] of Object.entries(config.providers)) {
       if (!provider.effectiveEnabled) continue;
-      const factory = factories[provider.type] ?? builtinFactories[provider.type];
+      const factory =
+        provider.type === 'custom'
+          ? factories[provider.factory ?? name]
+          : (factories[provider.type] ?? builtinFactories[provider.type]);
+      if (!factory) {
+        const key = provider.type === 'custom' ? (provider.factory ?? name) : provider.type;
+        throw new Error(
+          `providers.${name}: no adapter factory registered for "${key}" ` +
+            `(pass it in createGateway({ adapterFactories: { "${key}": factory } }))`,
+        );
+      }
       this.adapters.set(
         name,
         factory(name, provider, { ...deps, logger: deps.logger.child({ provider: name }) }),

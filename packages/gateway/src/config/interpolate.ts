@@ -12,6 +12,7 @@ export interface InterpolationIssue {
   variable: string;
 }
 
+/** A `${VAR}` reference to an unset environment variable without a default. */
 export class InterpolationError extends Error {
   readonly issues: InterpolationIssue[];
   constructor(issues: InterpolationIssue[]) {
@@ -52,7 +53,9 @@ export function interpolateString(
 
 const unescape = (s: string): string => s.replace(/\\(.)/g, '$1');
 
-/** Recursively interpolates all strings; throws InterpolationError listing every missing variable. */
+/**
+ * Recursively interpolates all strings; throws InterpolationError listing every missing variable.
+ */
 export function interpolate<T>(value: T, env: Record<string, string | undefined> = process.env): T {
   const issues: InterpolationIssue[] = [];
   const walk = (v: unknown, path: string): unknown => {

@@ -5,12 +5,21 @@ on:
     branches: [main]
     tags: ['v*.*.*']
   workflow_dispatch:
+  # release.yml calls this after a successful npm publish (tags pushed with GITHUB_TOKEN do not
+  # trigger workflows, so the release passes the version explicitly).
+  workflow_call:
+    inputs:
+      version:
+        description: Released version (e.g. 0.1.0) → tags <version>, <major>.<minor> and latest
+        type: string
+        required: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: docker-${{ github.ref }}
+  # github.workflow is the caller's name when called from release.yml → separate group
+  group: docker-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -42,9 +51,10 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=edge,branch=main
+            type=semver,pattern={{version}},value=${{ inputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.version }}
+            type=raw,value=latest,enable=${{ inputs.version != '' }}
+            type=edge,branch=main,enable=${{ inputs.version == '' }}
             type=sha,format=short
       - id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0

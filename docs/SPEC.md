@@ -250,11 +250,36 @@ Grafana dashboards (JSON in `observability/grafana/dashboards`): **Overview** (R
 - **Integration**: spin the gateway in-process against the mock provider (+ real Redis/PG test DB `llmgateway_test`): fallback on 503/timeout, breaker opening, streaming fallback-before-first-byte, 429 propagation with headers, budget 402, cache hit/replay, usage events land in PG via the worker.
 - **Contract**: official `openai` npm SDK (chat, stream, tools, embeddings) and `@anthropic-ai/sdk`-shaped fixtures against the gateway; Python `openai` SDK smoke script.
 - **Live smoke** (manual/opt-in `pnpm test:live`): opencode bridge — plain chat, stream, JSON schema, tool call round-trip (≤ 6 real calls).
-- **Load** (`bench/`): k6 or autocannon vs mock provider (0 ms upstream) → report gateway overhead p50/p99 and max RPS on this laptop in `bench/RESULTS.md`. Target: < 3 ms p50 overhead on cache-miss path (excluding upstream), < 1 ms on cache hit.
+- **Load** (`bench/`): k6 against a 0 ms mock provider reached over HTTP, compared with calling the mock directly. Scenarios: chat miss, streaming (TTFB as a TTFT proxy, and total), exact-cache hit, embeddings, each with the platform off and on. Constant-rate latency runs (p50, p95, p99) plus closed-loop max-RPS runs on one pinned gateway core. Results, hardware and raw JSON are in `bench/RESULTS.md` and `bench/results/`. Target: < 3 ms p50 overhead on the cache-miss path (excluding upstream), < 1 ms on a cache hit.
 
 ## 16. Packaging & release
 
-`packages/gateway` → npm `switchyard-gateway`: ESM + types, `bin: { switchyard }`, `exports` (`.`, `./mock-provider`), `files` whitelist, `engines.node >= 22`, provenance. Changesets for versioning; `release.yml` publishes on merge to main when a changeset is pending (needs `NPM_TOKEN` secret — documented); `docker.yml` builds multi-arch image to `ghcr.io/riz1-k/switchyard` with `GITHUB_TOKEN`. `npm pack --dry-run` verified locally.
+`packages/gateway` → npm `switchyard-gateway`, ESM-only with types:
+
+- `bin: { switchyard }`;
+- `exports`: `.`, `./mock-provider`, `./config.schema.json`, `./package.json`. The mock provider
+  is bundled, and `@switchyard/mock-provider` stays a private workspace package;
+- a `files` whitelist, `engines.node >= 22.12`, `publishConfig.provenance`;
+- `config.schema.json` (JSON Schema 2020-12, generated from zod with a drift test) and
+  `docs/CONFIG.md` generated from it.
+
+**Checks:** CI gates publint `--strict`, attw (`esm-only` profile), TSDoc on every public export,
+and a pack-smoke on Node 22 and 24: install the tarball in an empty project and run the CLI,
+server and library. `scripts/verdaccio-e2e.sh` repeats the smoke against a throwaway local
+registry, adding the official `openai` SDK.
+
+**Releases:** Changesets. `release.yml` opens a "Version Packages" PR while changesets are
+pending. When an unpublished version is on `main`, it:
+
+- packs once and publishes to npmjs.com with provenance, through **npm trusted publishing
+  (OIDC)**. An `NPM_TOKEN` is used only for the first publish, because trusted publishing needs
+  an existing package;
+- pushes the git tag and the GitHub Release;
+- publishes the scoped copy `@riz1-k/switchyard-gateway` to GitHub Packages (`GITHUB_TOKEN`);
+- calls `docker.yml` to push `ghcr.io/riz1-k/switchyard:<version>`, `:<major>.<minor>` and
+  `:latest`.
+
+The first public version is 0.1.0, published as-is. Owner setup is in `docs/RELEASING.md`.
 
 ## 17. Integration with DocsQA & OpsAgent (wave 4)
 

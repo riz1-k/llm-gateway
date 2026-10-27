@@ -27,12 +27,14 @@ export interface ResolvedModel {
   config: ModelConfig;
 }
 
+/** One target of a route: a model name with weight and optional timeout. */
 export interface ResolvedRouteTarget {
   model: string;
   weight: number;
   timeoutMs: number | undefined;
 }
 
+/** A route (virtual model) with defaults applied. */
 export interface ResolvedRoute {
   name: string;
   kind: OperationKind;
@@ -52,6 +54,9 @@ export interface ResolvedRoute {
   direct: boolean;
 }
 
+/**
+ * Validated config with cross-references resolved (models → providers, routes → models, pricing).
+ */
 export interface ResolvedConfig {
   raw: GatewayConfig;
   sourcePath: string | undefined;

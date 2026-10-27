@@ -123,6 +123,21 @@ interface SemanticPending {
 
 const DEFAULT_COMPLETION_ESTIMATE = 1024;
 
+/** Adds the Switchyard cost extension fields to a usage object (never mutates the input). */
+function usageWithCost(usage: Usage, costUsd: number, o: Outcome): Usage {
+  const out: Usage = { ...usage, cost: costUsd, sy_cache: o.cache };
+  if (o.savedUsd > 0) out.sy_saved_cost = o.savedUsd;
+  else delete out.sy_saved_cost;
+  return out;
+}
+
+/** Non-streamed chat bodies carry the same `usage.cost` as the final streamed chunk. */
+function withCost(response: ChatResponse, o: Outcome): ChatResponse {
+  if (!response.usage) return response;
+  const isHit = o.cache === 'hit' || o.cache === 'semantic-hit';
+  return { ...response, usage: usageWithCost(response.usage, isHit ? 0 : o.costUsd, o) };
+}
+
 async function* toAsync<T>(it: Iterable<T>): AsyncGenerator<T> {
   yield* it;
 }
@@ -210,6 +225,16 @@ export class Pipeline {
     promptTokens: number,
     maxCompletion: number,
   ): Promise<Admission> {
+    // The budget check only reads, so it runs concurrently with the rate-limit check (one Redis
+    // round-trip on the request path instead of two). Its result is used only when the rate
+    // limiter admits the request; a rate-limit rejection still wins.
+    const preflightCostUsd = estimateCost(promptTokens, maxCompletion, this.maxPricing(route));
+    const budgetCheck = this.services.budgets.check({
+      team: rctx.key.team,
+      route: route.name,
+      preflightCostUsd,
+    });
+    budgetCheck.catch(() => undefined); // observed below; never an unhandled rejection
     const rate = await this.services.rateLimiter.check({
       key: rctx.key,
       route: route.name,
@@ -230,12 +255,7 @@ export class Pipeline {
         { headers },
       );
     }
-    const preflightCostUsd = estimateCost(promptTokens, maxCompletion, this.maxPricing(route));
-    const budget = await this.services.budgets.check({
-      team: rctx.key.team,
-      route: route.name,
-      preflightCostUsd,
-    });
+    const budget = await budgetCheck;
     if (!budget.allowed) {
       // Release the TPM reservation: the request never reaches a provider.
       await this.services.rateLimiter.reconcile(rate, 0).catch(() => undefined);
@@ -327,13 +347,17 @@ export class Pipeline {
     const usage = o.usage;
     const totalTokens = usage ? usage.prompt_tokens + usage.completion_tokens : 0;
     try {
-      if (admission) await this.services.rateLimiter.reconcile(admission.rate, totalTokens);
-      if (o.costUsd > 0)
-        await this.services.budgets.record({
-          team: rctx.key.team,
-          route: route.name,
-          costUsd: o.costUsd,
-        });
+      // Independent writes: TPM reconciliation and budget spend in parallel (one round-trip).
+      await Promise.all([
+        admission ? this.services.rateLimiter.reconcile(admission.rate, totalTokens) : undefined,
+        o.costUsd > 0
+          ? this.services.budgets.record({
+              team: rctx.key.team,
+              route: route.name,
+              costUsd: o.costUsd,
+            })
+          : undefined,
+      ]);
     } catch (err) {
       rctx.logger.error({ err }, 'accounting failed');
     }
@@ -651,7 +675,7 @@ export class Pipeline {
         o.savedUsd = hit.costUsd;
         o.cachedFrom = { provider: hit.provider, model: hit.model };
         // The body keeps the original usage; accounting records no upstream tokens for a hit.
-        const response: ChatResponse = { ...hit.payload.response, model: route.name };
+        const response: ChatResponse = withCost({ ...hit.payload.response, model: route.name }, o);
         if (stream)
           return this.streamResult(
             rctx,
@@ -688,7 +712,7 @@ export class Pipeline {
       o.model = model;
       o.usage = value.usage;
       o.costUsd = computeCost(value.usage, model.pricing).costUsd;
-      const response: ChatResponse = { ...value, model: route.name };
+      const response: ChatResponse = withCost({ ...value, model: route.name }, o);
       const finish = response.choices[0]?.finish_reason;
       if (finish === 'stop' || finish === 'tool_calls' || finish === 'length') {
         this.cacheSet(cacheKey, route, { kind: 'chat', response: value }, o, rctx);
@@ -708,7 +732,9 @@ export class Pipeline {
 
   /**
    * Builds the SSE response. Headers are final at this point (the router already committed to a
-   * target), so `x-sy-cost-usd` is omitted for streams; cost is logged and emitted as usage.
+   * target), so `x-sy-cost-usd` is omitted for streams (except cache hits, where it is 0); the
+   * final usage chunk carries `usage.cost` instead when the client asked for
+   * `stream_options.include_usage`. Cost is also logged and emitted as a usage event.
    */
   private streamResult(
     rctx: RequestContext,
@@ -753,6 +779,13 @@ export class Pipeline {
       const out: ChatChunk = { ...chunk, model: route.name };
       if (!includeUsage) delete out.usage;
       else if (!isUsageOnly) out.usage = null;
+      else if (out.usage) {
+        // Headers went out before usage was known: the final usage chunk carries the cost
+        // (OpenRouter's `usage.cost` convention). `acc` already contains this chunk.
+        const isHit = o.cache === 'hit' || o.cache === 'semantic-hit';
+        const cost = isHit ? 0 : computeCost(acc.usage, o.model?.pricing).costUsd;
+        out.usage = usageWithCost(out.usage, cost, o);
+      }
       return out;
     };
 

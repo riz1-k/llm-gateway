@@ -1,314 +1,366 @@
 # Switchyard
 
-**An OpenAI-compatible LLM gateway that makes any backend behave like OpenAI, including ones that
-can't do tool calling or JSON mode natively.**
+[![CI](https://github.com/riz1-k/llm-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/riz1-k/llm-gateway/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/switchyard-gateway)](https://www.npmjs.com/package/switchyard-gateway)
+[![image](https://img.shields.io/badge/ghcr.io-riz1--k%2Fswitchyard-blue)](https://github.com/riz1-k/llm-gateway/pkgs/container/switchyard)
+[![node](https://img.shields.io/node/v/switchyard-gateway)](packages/gateway/package.json)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Switchyard sits between your apps and your model providers. Apps talk plain OpenAI (official SDKs,
-LangChain `ChatOpenAI`, curl) to _virtual models_ such as `docsqa-chat`. Switchyard routes each
-call across providers with ordered fallback, retries, timeouts and circuit breakers, and prices
-every request. With Redis and Postgres it adds a platform layer: teams and virtual keys, RPM/TPM
-limits, USD budgets, exact and semantic caching, persisted usage, an admin API and Prometheus
-metrics. It speaks to:
+**An OpenAI-compatible LLM gateway in TypeScript: one endpoint for every model, with fallback,
+caching, rate limits, budgets and per-team cost tracking. It also makes backends that can't do
+tool calling or JSON mode behave like OpenAI.**
 
-- OpenAI and Anthropic (native Messages API translation, including streaming tool use)
-- OpenAI-compatible servers (llama.cpp, vLLM, Ollama, Groq, …), including embeddings and
-  Cohere/Jina-style **rerank**
-- an **opencode bridge** to GitHub Copilot models, where it emulates tool calling and structured
-  output that the bridge doesn't support
-- a deterministic **mock provider** for tests, CI and chaos demos
+Apps talk plain OpenAI (official SDKs, LangChain, curl) to _virtual models_ such as `chat`.
+Switchyard routes each call across providers with ordered fallback, retries and circuit
+breakers, and prices every request. Add Redis and Postgres and it becomes a small multi-tenant
+platform: teams and virtual keys, RPM/TPM limits, USD budgets, exact and semantic caching, a
+usage ledger, an admin API and Grafana dashboards. It runs as a CLI and server, as a container,
+on Kubernetes (Helm), or embedded in your own app as a [Hono](https://hono.dev) handler.
 
-```
-TypeScript (strict, ESM) · Hono · zod v4 · ajv · pino · ioredis (Redis 8) · drizzle-orm (Postgres) · prom-client · vitest — Node ≥ 22
+```bash
+npx switchyard-gateway init && npx switchyard-gateway serve   # offline demo, no API keys needed
 ```
 
 ## Features
 
-|                          |                                                                                                                                                                                                                                                                                                                                                               |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Drop-in OpenAI API**   | `POST /v1/chat/completions` (incl. SSE streaming, `stream_options.include_usage`, tools, `response_format`), `POST /v1/embeddings` (+ `input_type` templates), `POST /v1/rerank`, `GET /v1/models`. OpenAI error envelope. Verified with the official `openai` npm and Python SDKs.                                                                           |
-| **Virtual models**       | Routes map a public name to ordered targets with `fallback`, `weighted` (smooth WRR) or `least-latency` (EWMA + ε-exploration) strategies. Per-key route allow-lists.                                                                                                                                                                                         |
-| **Resilience**           | Retries with exponential backoff + full jitter honoring `Retry-After` (capped). Per-attempt timeout plus total route deadline. Circuit breakers per target (rolling window, consecutive-failure trip, exponential cooldown, half-open probe). Per-provider concurrency semaphores with queue timeout. **Streaming fallback until the first byte is flushed.** |
-| **Emulation layer**      | For backends without native support: tool calling via `<tool_call>` blocks with a tolerant parser, ajv schema validation and one repair round-trip; JSON mode (`json_object` / `json_schema`, strict) with validation and repair; multi-turn transcript rendering; reasoning-effort mapping.                                                                  |
-| **Cost attribution**     | Every response carries `x-sy-cost-usd` computed from usage × pricing table (cached / cache-write / reasoning tokens handled). Usage events per request (team, key, route, provider, tokens, cost, latency, TTFT, attempts, fallbacks, tags).                                                                                                                  |
-| **Ops**                  | Request-ID propagation, structured pino logs (never prompt bodies by default), `/healthz`, `/readyz` (+ admin-only provider probes via `?probe=1`), graceful shutdown with drain, hot config reload (SIGHUP / admin API) with atomic snapshot swap.                                                                                                           |
-| **Teams & virtual keys** | Postgres-backed teams and `sk-sy-…` keys (SHA-256 at rest, plaintext shown once), with per-key route allow-lists, RPM/TPM overrides and expiry. Keys are cached in Redis and invalidated over pub/sub on every replica. Rotation supports a grace period, and every admin mutation is audit-logged.                                                           |
-| **Rate limits**          | Sliding-window RPM and TPM at key and team scope, checked in one atomic Lua call. TPM reserves the pre-flight estimate and is reconciled to actual usage. Returns OpenAI-style `x-ratelimit-*` headers plus `retry-after`.                                                                                                                                    |
-| **Budgets**              | Daily and monthly USD budgets per team. A pre-flight upper-bound check returns 402 `budget_exceeded`. Soft-threshold alerts fire once per period and can call a webhook. Spend is reconciled from Postgres, and the admin view shows utilization with a linear projection.                                                                                    |
-| **Caching**              | Exact response cache (canonical request hash, per-team namespace, gzip) for chat, embeddings (per input item) and rerank. Semantic cache on Redis 8 vector sets. Streaming replay of hits; `x-sy-cache: default\|bypass\|refresh`; savings reported in `x-sy-saved-usd`.                                                                                      |
-| **Usage & reporting**    | Usage events go to a Redis stream. `switchyard worker` writes them to monthly-partitioned Postgres tables plus daily rollups using consumer groups, idempotent inserts and XAUTOCLAIM. Reports are available from the CLI and the admin API.                                                                                                                  |
-| **Observability**        | Prometheus `/metrics` (SPEC §13 names, see [docs/METRICS.md](docs/METRICS.md)), circuit breakers shared across replicas through Redis, and `/readyz` checks of Redis and Postgres.                                                                                                                                                                            |
+- **Drop-in OpenAI API:** `/v1/chat/completions` (streaming, tools, `response_format`,
+  `stream_options.include_usage`), `/v1/embeddings`, `/v1/rerank` (Cohere/Jina shape) and
+  `/v1/models`, with OpenAI-style errors. Verified with the official `openai` SDKs for Node and
+  Python.
+- **Providers:**
+  - OpenAI and Anthropic, natively (the Messages API is translated, including streaming tool use);
+  - any OpenAI-compatible server (llama.cpp, vLLM, Ollama, Groq, OpenRouter, …);
+  - an [opencode](https://opencode.ai) bridge to GitHub Copilot models, with **emulated tool
+    calling and JSON mode**;
+  - a deterministic, fault-injectable mock;
+  - your own adapter (`type: custom`).
+- **Routing and resilience:**
+  - virtual models with `fallback`, `weighted` or `least-latency` strategies;
+  - retries with backoff and jitter that honour `Retry-After`;
+  - per-attempt timeouts and route deadlines;
+  - circuit breakers shared across replicas, and per-provider concurrency limits;
+  - fallback during streaming, up to the first byte.
+- **Caching:** an exact cache (per team, gzip, streamed replay) and an opt-in semantic cache on
+  Redis 8 vector sets. Embeddings are cached per input item.
+- **Limits and budgets:** sliding-window RPM/TPM per key and team in one atomic Lua call; daily
+  and monthly USD budgets per team with soft alerts and hard 402 blocks.
+- **Cost tracking:** every request is priced. The cost is in `x-sy-cost-usd` and in
+  `usage.cost`, including the final streamed chunk. Usage events flow Redis Stream → worker →
+  partitioned Postgres tables with daily rollups.
+- **Operations:**
+  - Prometheus metrics, Grafana dashboards and alert rules with runbooks;
+  - `/healthz` and `/readyz`;
+  - hot config reload and graceful shutdown;
+  - a distroless image, a Helm chart and Terraform for kind.
+- **Developer experience:**
+  - `switchyard init` writes a starter config;
+  - a JSON Schema gives editor completion for `gateway.yaml`;
+  - the whole public API carries TSDoc;
+  - an in-process `fetch` handler for zero-network tests.
 
 ## Quickstart
 
-```bash
-pnpm install
-pnpm build
-
-# 1) A fully offline gateway against the built-in mock provider
-cat > /tmp/sy.yaml <<'EOF'
-auth: { static_keys: [{ key: sk-sy-local-demo-key, team: demo }] }
-providers: { mock: { type: mock } }
-models:   { rag: { provider: mock, model: mock-extractive } }
-routes:   { chat: { targets: [rag] } }
-EOF
-node packages/gateway/dist/cli.js serve --config /tmp/sy.yaml --port 8787
-
-curl -s localhost:8787/v1/chat/completions \
-  -H 'Authorization: Bearer sk-sy-local-demo-key' -H 'content-type: application/json' \
-  -d '{"model":"chat","messages":[{"role":"user","content":"<source id=\"1\">Hono is a small web framework.</source> What is Hono?"}]}'
-# → "Hono is a small web framework. [1]"   (+ x-sy-route / x-sy-provider / x-sy-cost-usd headers)
-```
-
-```python
-from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8787/v1", api_key="sk-sy-local-demo-key")
-print(client.chat.completions.create(model="chat", messages=[{"role": "user", "content": "hi"}]).choices[0].message.content)
-```
-
-**Local dev stack** (opencode bridge on :4096, llama.cpp on :8081–8083): `make dev` runs
-`scripts/dev.sh`, which sources `../devenv/.env` and serves `config/gateway.local.yaml` on :8787.
-Then run `uv run --with openai python scripts/smoke_openai_sdk.py` for an end-to-end check with
-the Python SDK.
-
-CLI:
-
-```
-switchyard serve --config <file> [--port <n>] [--host <addr>]
-switchyard migrate --config <file>            # Postgres schema (idempotent)
-switchyard worker --config <file> [--port n]  # usage stream → Postgres (+ /metrics)
-switchyard validate-config <file>
-switchyard mock-provider [--port 8790] [--latency-ms n] [--fail-rate p] [--fail-status code]
-switchyard teams|keys|budgets|usage|cache|seed-dev …   # admin, see below
-```
-
-### Admin quickstart (Redis + Postgres)
-
-Add `redis.url` and `database.url` to the config. Every option is documented in
-[`config/gateway.example.yaml`](config/gateway.example.yaml); the full guide is
-[docs/ADMIN.md](docs/ADMIN.md).
+### npx
 
 ```bash
-export SWITCHYARD_ADMIN_TOKEN=$(openssl rand -hex 24)
-switchyard migrate --config gateway.yaml
-switchyard serve   --config gateway.yaml &      # or set usage.in_process_writer: true and skip the worker
-switchyard worker  --config gateway.yaml &
-
-# Local mode (--config) talks to Postgres directly; remote mode uses the admin API:
-export SWITCHYARD_URL=http://localhost:8787
-switchyard teams create docsqa --name DocsQA --monthly-budget 50
-switchyard keys create --team docsqa --name local --routes docsqa-chat,docsqa-embed
-#   ✔ key sk-sy-…   (shown once)
-switchyard budgets show --team docsqa
-switchyard usage --team docsqa --group-by route
-switchyard seed-dev --output .env.gateway-keys   # dev: teams docsqa/opsagent/evals with budgets + keys
+npx switchyard-gateway init     # writes gateway.yaml (mock provider) + .env.example
+npx switchyard-gateway serve    # → http://localhost:8787/v1
 ```
 
-The same operations are available over HTTP under `/admin/*` with
-`Authorization: Bearer $SWITCHYARD_ADMIN_TOKEN`. For example,
-`POST /admin/teams/:id/keys` and `GET /admin/teams/:id/budget`.
-
-Library:
+```bash
+curl localhost:8787/v1/chat/completions \
+  -H 'authorization: Bearer sk-sy-local-change-me' -H 'content-type: application/json' \
+  -d '{"model":"chat","messages":[{"role":"user","content":"hello"}]}'
+```
 
 ```ts
-import { createGateway, loadConfig } from 'switchyard-gateway';
-const gateway = createGateway({ config: loadConfig('gateway.yaml') });
-export default gateway.app; // a Hono app: mount it anywhere
+import OpenAI from 'openai';
+
+const client = new OpenAI({ baseURL: 'http://localhost:8787/v1', apiKey: 'sk-sy-local-change-me' });
+const res = await client.chat.completions.create({
+  model: 'chat', // a Switchyard route
+  messages: [{ role: 'user', content: 'hello' }],
+});
+console.log(res.choices[0].message.content, res.usage); // usage.cost = USD for this request
 ```
 
-## Architecture
+Install it globally with `npm i -g switchyard-gateway` to get the `switchyard` command
+(Node.js 22.12 or later). Then replace the mock in `gateway.yaml` with real providers (see
+[Configuration](#configuration)).
+
+### Docker
+
+```bash
+docker run --rm -p 8787:8787 -e OPENAI_API_KEY \
+  -v "$PWD/gateway.yaml:/etc/switchyard/gateway.yaml:ro" ghcr.io/riz1-k/switchyard:0.1.0
+```
+
+The full local stack (gateway, worker, Redis, Postgres, Prometheus, Grafana and the mock) starts
+with `make compose-up && make compose-demo`. Grafana is then on `:3301`.
+
+### Helm
+
+```bash
+git clone https://github.com/riz1-k/llm-gateway && cd llm-gateway
+helm install switchyard deploy/helm/switchyard -n switchyard --create-namespace -f my-values.yaml
+```
+
+`my-values.yaml` holds your `gateway.yaml` under `config:` and points to your Redis 8 and
+Postgres. The chart runs the API and the worker, a migration hook, an HPA, a PDB and a
+ServiceMonitor. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md), which also covers Terraform and kind.
+
+### As a library
+
+```ts
+import { serve } from '@hono/node-server';
+import { createGateway, loadConfig } from 'switchyard-gateway';
+
+const gateway = createGateway({ config: loadConfig('gateway.yaml') });
+serve({ fetch: gateway.fetch, port: 8787 }); // or app.route('/llm', gateway.app) in your Hono app
+```
+
+Custom providers, replaceable services (keys, limits, cache, usage sink) and in-process testing
+with the OpenAI SDK are covered in [docs/LIBRARY.md](docs/LIBRARY.md).
+
+## How it works
 
 ```mermaid
 flowchart LR
-  subgraph Clients
-    A[DocsQA<br/>openai SDK] --- B[OpsAgent<br/>LangChain]
+  C["OpenAI SDK / LangChain / curl"] -->|"Bearer sk-sy-…"| A
+  subgraph SY["Switchyard"]
+    A["auth<br/>(static / DB keys)"] --> V["validate +<br/>resolve route"] --> E["estimate<br/>tokens + cost"]
+    E --> L["rate limits<br/>(Lua, key + team)"] --> B["budget<br/>pre-flight"] --> K{"cache<br/>exact / semantic"}
+    K -->|hit| R["response<br/>(+ streamed replay)"]
+    K -->|miss| D["router: strategy →<br/>breaker → semaphore →<br/>attempt + retry → fallback"]
+    D --> ACC["account: cost · TPM/budget<br/>reconcile · cache write"] --> R
+    ACC -.->|XADD| U[("Redis Stream")]
   end
-  A & B -->|"OpenAI API + Bearer sk-sy-…"| H
-
-  subgraph Switchyard
-    H[Hono HTTP<br/>request-id · auth · validation] --> P
-    subgraph P[Pipeline]
-      direction LR
-      R[resolve route] --> E[estimate] --> RL[RateLimiter] --> BG[BudgetGuard] --> C[CacheStore]
-      C --> D[Router] --> ACC[account<br/>cost · usage · cache write]
-    end
-    D --> S{strategy<br/>fallback / weighted / least-latency}
-    S --> CB[BreakerStore] --> SEM[semaphore] --> T[attempt w/ timeout<br/>retry + backoff]
-  end
-
-  T --> OC[opencode adapter<br/>transcript · tool & JSON emulation · /event streaming]
-  T --> OA[openai / openai-compatible]
-  T --> AN[anthropic<br/>Messages ⇄ OpenAI]
-  T --> MK[mock<br/>deterministic + faults]
-  OC --> COP[(opencode serve<br/>→ GitHub Copilot)]
-  OA --> LL[(llama.cpp · vLLM · OpenAI)]
-  AN --> ANT[(Anthropic API)]
+  D --> P1[(OpenAI)] & P2[(Anthropic)] & P3[("llama.cpp / vLLM / …")] & P4[("opencode → Copilot")] & P5[(custom)]
+  U -.-> W["worker"] -.-> PG[("Postgres<br/>usage ledger")]
 ```
 
-The request path, in order: `requestId → auth (KeyStore) → validate (zod) → resolve route
-(scope check) → route defaults → estimate tokens/cost → RateLimiter.check → BudgetGuard.check →
-CacheStore.get → Router.dispatch → account (cost → reconcile → budget record → cache write →
-UsageSink.emit) → headers`.
-
-The router walks targets in strategy order:
-
-1. Skip disabled targets and targets whose breaker is open.
-2. Acquire a provider concurrency slot.
-3. Call the adapter with a scoped timeout signal.
-4. Retry retryable errors (429/5xx/timeout/network) on the same target with backoff, then fall
-   back to the next target.
-
-Client errors (upstream 400/422) are returned immediately. A streaming attempt is committed only
-when its first meaningful chunk arrives, so failures before any text still fall back.
+Each step is a small module behind an interface (`KeyStore`, `RateLimiter`, `BudgetGuard`,
+`CacheStore`, `UsageSink`, `BreakerStore`). Without Redis and Postgres they are in-memory or
+no-ops; with them they are shared across replicas. The full request lifecycle, failure behaviour
+and data layout are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and the design decisions in
+[docs/adr/](docs/adr/README.md).
 
 ## Configuration
 
-YAML, validated by zod, with `${ENV}` / `${ENV:-default}` interpolation applied to parsed values
-(never raw text). Errors are reported with paths, e.g.
-`routes.chat.targets[1]: unknown model "missing"`. See the documented
-[`config/gateway.example.yaml`](config/gateway.example.yaml) and the machine-specific
-[`config/gateway.local.yaml`](config/gateway.local.yaml).
-
-| Section                      | Purpose                                                                                                                                                                                           |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `server`                     | port, host, default route deadline, body limit, shutdown grace                                                                                                                                    |
-| `auth`                       | `admin_token`, `static_keys[{key, team, name, allowed_routes?, allow_direct_models?, rpm?, tpm?}]`                                                                                                |
-| `providers.<name>`           | `type: opencode \| openai-compatible \| openai \| anthropic \| mock` + `base_url`, credentials, `max_concurrency`, `queue_timeout_ms`, `timeout_ms`, `headers`, `enabled_if_key`                  |
-| `models.<name>`              | concrete target: `provider`, upstream `model`, `kind: chat\|embedding\|rerank`, per-model `base_url`, `input_templates`, `pricing`, `timeout_ms`, default `params`                                |
-| `routes.<name>`              | public virtual model: `targets`, `strategy`, `retry{attempts,backoff_ms,max_backoff_ms,max_retry_after_ms}`, `timeout_ms`, `cache`, `defaults{reasoning_effort,max_tokens,temperature}`, `hidden` |
-| `retry`, `breaker`           | global defaults                                                                                                                                                                                   |
-| `pricing_file`               | USD per 1M tokens table (`config/pricing.json`); per-model `pricing` overrides                                                                                                                    |
-| `redis`, `database`          | enable the platform layer (see [docs/ADMIN.md](docs/ADMIN.md)); `redis.fail_open` controls behaviour when Redis is down                                                                           |
-| `limits`, `budgets`, `usage` | rate-limit defaults and window, budget enforcement, alerts and reconciliation, usage stream and worker settings                                                                                   |
-| `metrics`, `observability`   | `/metrics` path or separate port, log level, body logging                                                                                                                                         |
-
-### Request & response headers
-
-| Request                                          | Meaning                                                           |
-| ------------------------------------------------ | ----------------------------------------------------------------- |
-| `Authorization: Bearer sk-sy-…` (or `x-api-key`) | virtual key bound to a team                                       |
-| `x-request-id`                                   | propagated (generated if absent/unsafe); see note below           |
-| `x-sy-user`, `x-sy-tags`                         | end-user attribution, comma-separated tags (land in usage events) |
-| `x-sy-cache: default \| bypass \| refresh`       | cache control                                                     |
-
-| Response                                                    | Meaning                                                          |
-| ----------------------------------------------------------- | ---------------------------------------------------------------- |
-| `x-request-id`, `x-sy-route`, `x-sy-provider`, `x-sy-model` | where the request went (`x-sy-model` = upstream model)           |
-| `x-sy-cache`                                                | `miss` / `bypass` / `hit` / `semantic-hit`                       |
-| `x-sy-cost-usd`                                             | priced from usage (non-streaming responses and cache hits)       |
-| `x-sy-saved-usd`, `x-sy-semantic-similarity`                | on cache hits: original cost saved; cosine similarity (semantic) |
-| `x-sy-cache-items`                                          | embeddings: `<cached>/<total>` input items served from cache     |
-| `x-sy-fallbacks`, `x-sy-latency-ms`                         | number of targets skipped/failed before success; gateway latency |
-| `x-ratelimit-{limit,remaining,reset}-{requests,tokens}`     | tightest rate-limit scope (key or team)                          |
-| `retry-after`, `retry-after-ms`                             | on 429 (gateway limits) and upstream-unavailable 503s            |
-
-A client-supplied `x-request-id` is echoed back unchanged and used in logs. Usage rows in
-Postgres store `<client-id>:req_<24 chars>` instead, because client ids are not guaranteed to be
-unique and the usage ledger is idempotent on `(ts, request_id)`. Search usage by prefix
-(`request_id LIKE '<client-id>:%'`). Plain `/readyz` (Redis + Postgres) is unauthenticated.
-`/readyz?probe=1`, which also probes every upstream, requires the admin token.
-
-Error codes (OpenAI envelope `{"error":{"message","type","code","param"}}`):
-
-| Status | Codes                                                                                                      |
-| ------ | ---------------------------------------------------------------------------------------------------------- |
-| 400    | `invalid_request`, `unsupported_content`                                                                   |
-| 401    | `invalid_api_key`                                                                                          |
-| 402    | `budget_exceeded`                                                                                          |
-| 403    | `model_not_allowed`                                                                                        |
-| 404    | `model_not_found`                                                                                          |
-| 409    | `conflict` (admin API)                                                                                     |
-| 429    | `rate_limit_exceeded`                                                                                      |
-| 502    | `upstream_error`, `upstream_invalid_output`                                                                |
-| 503    | `upstream_unavailable` (+ `retry-after`), `service_unavailable` (Redis/Postgres down in fail-closed paths) |
-| 504    | `upstream_timeout`                                                                                         |
-
-### Embedding templates
-
-Some embedding models need task prefixes (embeddinggemma: `task: search result | query: …`).
-Clients send the extension field `input_type: "query" | "document"` (and optionally
-`input_titles: string[]`), and the gateway applies the target model's `input_templates`:
+One YAML file with `${ENV}` / `${ENV:-default}` interpolation, validated at startup and by
+`switchyard validate-config`. Add the schema line for completion and typo detection in your
+editor:
 
 ```yaml
-input_templates:
-  query: 'task: search result | query: {text}'
-  document: 'title: {title} | text: {text}' # {title} ← input_titles[i] or "none"
+# yaml-language-server: $schema=https://unpkg.com/switchyard-gateway/config.schema.json
+auth:
+  static_keys: [{ key: '${APP_KEY}', team: my-app }] # or database keys: switchyard keys create
+providers:
+  openai: { type: openai, api_key: '${OPENAI_API_KEY}' }
+  anthropic: { type: anthropic, api_key: '${ANTHROPIC_API_KEY}' }
+  local: { type: openai-compatible, base_url: http://127.0.0.1:8081/v1 }
+models:
+  gpt: { provider: openai, model: gpt-5.6-luna }
+  sonnet: { provider: anthropic, model: claude-sonnet-5.5 }
+  qwen: { provider: local, model: qwen3.5-2b, pricing: { input: 0, output: 0 } }
+  embedder: { provider: openai, model: text-embedding-3-small, kind: embedding }
+routes:
+  chat: # what clients put in "model"
+    targets: [sonnet, gpt, qwen] # tried in order on failure
+    retry: { attempts: 2 }
+    cache: { exact: { ttl_s: 3600 } }
+  embed: { targets: [embedder], cache: { exact: { ttl_s: 2592000 } } }
+# optional platform layer
+redis: { url: '${REDIS_URL}' } # limits, budgets, shared cache + breakers, usage stream
+database: { url: '${DATABASE_URL}' } # DB keys and teams, budgets, usage ledger, admin API
+limits: { defaults: { key: { rpm: 600, tpm: 2000000 }, team: { rpm: 1200 } } }
 ```
+
+- [docs/CONFIG.md](docs/CONFIG.md): every option, generated from the schema.
+- [config/gateway.example.yaml](config/gateway.example.yaml): a fully commented example.
+- [docs/ADMIN.md](docs/ADMIN.md): teams, keys, budgets and the admin API.
+
+### Providers
+
+| `type`              | Chat + stream    | Tools                 | JSON mode          | Embeddings | Rerank |
+| ------------------- | ---------------- | --------------------- | ------------------ | ---------- | ------ |
+| `openai`            | ✓                | ✓ native              | ✓ native           | ✓          | –      |
+| `anthropic`         | ✓ (translated)   | ✓ (`tool_use`)        | ✓ (tool or prompt) | –          | –      |
+| `openai-compatible` | ✓                | ✓ (if the server can) | passthrough        | ✓          | ✓      |
+| `opencode`          | ✓ (`/event` SSE) | ✓ **emulated**        | ✓ **emulated**     | –          | –      |
+| `mock`              | ✓                | ✓ scripted            | –                  | ✓          | ✓      |
+| `custom`            | your adapter     |                       |                    |            |        |
+
+**opencode emulation:** the opencode server API has no `tools` or `response_format`. Switchyard
+works around this:
+
+- it renders the conversation into a transcript and describes the tools in the system prompt;
+- it parses `<tool_call>` blocks with a tolerant scanner and validates names and arguments with
+  ajv against your JSON Schemas;
+- it asks for one repair when the output is invalid;
+- it streams text deltas until a tool call starts.
+
+Clients get standard `tool_calls` and validated JSON. See
+[ADR 0002](docs/adr/0002-opencode-emulation.md) and
+[docs/opencode-bridge.md](docs/opencode-bridge.md).
+
+### Routing
+
+A route lists targets and a strategy: `fallback` (in order), `weighted` (smooth weighted
+round-robin) or `least-latency` (latency EWMA with ε-exploration). Retryable failures (429, 5xx,
+timeouts, network) are retried on the same target with exponential backoff and full jitter, then
+fall back to the next target. Client errors return immediately. Breakers open on a failure rate
+or consecutive failures, cool down exponentially and probe half-open. Every response says where
+it went: `x-sy-route`, `x-sy-provider`, `x-sy-model` and `x-sy-fallbacks`.
+
+### Caching
+
+- **Exact:** for deterministic requests (temperature 0 or unset, `n ≤ 1`). The key is a
+  canonical hash of every response-affecting field, namespaced per team unless the route sets
+  `shared: true`. Streaming requests get the cached response as a synthesized stream.
+- **Semantic** (opt-in per route): embeds the last user message through one of your embedding
+  routes and searches a Redis 8 vector set scoped by the exact system prompt and conversation
+  ([ADR 0005](docs/adr/0005-semantic-cache-redis-vector-sets.md)).
+- **Controls:** `x-sy-cache: bypass | refresh` per request. Hits report `x-sy-cache: hit`,
+  `usage.cost: 0` and the saved cost.
+
+### Limits and budgets
+
+- **Rate limits:** sliding windows for RPM and TPM at key and team scope, checked
+  all-or-nothing in one Lua call. TPM reserves the estimate and is reconciled to real usage.
+  Rejections return OpenAI-style `x-ratelimit-*` headers and 429
+  ([ADR 0003](docs/adr/0003-lua-sliding-window-limits.md)).
+- **Budgets:** daily and monthly USD limits per team. A pre-flight upper-bound check returns 402
+  `budget_exceeded`. Soft-threshold alerts fire once per period, optionally to a webhook. Redis
+  counters are reconciled from Postgres
+  ([ADR 0006](docs/adr/0006-budgets-preflight-reconciliation.md)).
+
+```bash
+switchyard teams create search --monthly-budget 50 --rpm 600
+switchyard keys create --team search --name prod --routes chat,embed   # prints sk-sy-… once
+switchyard usage --team search --group-by model
+```
+
+### Cost
+
+Prices come from [`config/pricing.json`](config/pricing.json) (USD per 1M input, cached-input
+and output tokens) or a per-model `pricing:` block. Every request is priced from the upstream's
+usage report, falling back to an estimate. The cost appears in three places:
+
+- the `x-sy-cost-usd` header;
+- `usage.cost` and `usage.sy_cache` in response bodies and in the final streamed chunk (with
+  `stream_options.include_usage`);
+- the usage ledger, with cache savings tracked separately.
+
+See [docs/API.md](docs/API.md#cost-in-the-response-body-usagecost).
+
+### Observability
+
+Prometheus metrics cover requests, latency, TTFT, tokens, cost, cache results, rate-limit and
+budget rejections, fallbacks, retries, breaker states, provider concurrency and usage-stream lag
+([docs/METRICS.md](docs/METRICS.md)). Three provisioned Grafana dashboards and alert rules with
+runbooks are included ([docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)).
+
+| Overview                                                       | Cost & budgets                                         | Providers & reliability                                          |
+| -------------------------------------------------------------- | ------------------------------------------------------ | ---------------------------------------------------------------- |
+| ![Overview](observability/screenshots/switchyard-overview.png) | ![Cost](observability/screenshots/switchyard-cost.png) | ![Providers](observability/screenshots/switchyard-providers.png) |
 
 ## Deployment
 
-The same distroless image (188 MB, non-root) runs `serve`, `worker` and `migrate`. See
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for details and
-[docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) for dashboards, alerts and runbooks.
+| Target         | How                                                                                                                                  |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Single process | `switchyard serve` (`usage.in_process_writer: true` when using Postgres)                                                             |
+| Docker         | `ghcr.io/riz1-k/switchyard`: distroless, non-root, multi-arch, about 65 MB compressed; one image for `serve`, `worker` and `migrate` |
+| Compose        | `deploy/docker/docker-compose.yml`: the full stack with dashboards                                                                   |
+| Kubernetes     | `deploy/helm/switchyard`, plus Terraform modules and a kind environment in `deploy/terraform`                                        |
 
-```bash
-make compose-up && make compose-demo   # full stack: gateway :8797, Grafana :3301, Prometheus :9091
-make compose-down
-make k8s-up && make k8s-demo           # kind + Helm chart + kube-prometheus-stack via Terraform
-make k8s-down
-make lint-infra                        # promtool, helm lint + kubeconform, terraform/tflint, actionlint
-```
+Details in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Production hardening is in
+[SECURITY.md](SECURITY.md).
 
-| Path                      | What                                                                                             |
-| ------------------------- | ------------------------------------------------------------------------------------------------ |
-| `deploy/docker/`          | Dockerfile, `docker-compose.yml` (8 services, memory limits, healthchecks)                       |
-| `deploy/helm/switchyard/` | Helm chart: API + worker, migration hook, HPA, PDB, Ingress, ServiceMonitor, PrometheusRule      |
-| `deploy/terraform/`       | modules `switchyard`, `postgres`, `redis`, `observability`; envs `local-kind`, `aws-eks-example` |
-| `observability/`          | Grafana dashboards (generated), provisioning, Prometheus config, alert rules + unit tests        |
-| `.github/workflows/`      | CI (tests, audit, gitleaks, infra lint, image build) and multi-arch GHCR publishing              |
+## Benchmarks
 
-![Cost & Budgets dashboard](observability/screenshots/switchyard-cost.png)
+Measured with k6 against a mock upstream that answers instantly, so the numbers are the
+gateway's own cost. The gateway is pinned to **one core** of a laptop CPU (i5-1135G7), with the
+load generator on another. Each latency run is 200 req/s. Overhead is gateway p50 minus direct
+p50. Full method, raw data and caveats are in [bench/RESULTS.md](bench/RESULTS.md).
 
-## Testing
+<!-- BENCH:START -->
 
-```bash
-pnpm test        # 343 tests: unit + integration (in-process gateway ⇄ mock provider over HTTP) + openai SDK contract
-                 #   + platform integration against real Redis (db 1) and Postgres (llmgateway_test)
-pnpm lint        # eslint (type-aware) + prettier
-pnpm typecheck
-pnpm test:live   # opt-in: 5 real calls through the opencode bridge (SWITCHYARD_LIVE=1)
-```
+| Scenario (p50, 200 req/s)               | Direct mock | Gateway, platform off | Gateway, platform on |
+| --------------------------------------- | ----------: | --------------------: | -------------------: |
+| Chat, cache miss                        |     0.34 ms |    2.60 ms (+2.26 ms) |   3.76 ms (+3.41 ms) |
+| Streaming, time to first byte           |     0.35 ms |    4.44 ms (+4.08 ms) |   3.57 ms (+3.21 ms) |
+| Exact-cache hit (vs a full direct call) |     0.34 ms |    0.83 ms (+0.48 ms) |   2.06 ms (+1.72 ms) |
+| Embeddings (2 inputs)                   |     0.30 ms |    2.84 ms (+2.55 ms) |   4.72 ms (+4.42 ms) |
+| Max throughput, miss (one core)         | 4,198 req/s |           1,243 req/s |            651 req/s |
+| Max throughput, hit (one core)          |           – |           3,630 req/s |          2,017 req/s |
 
-The platform tests need Redis 8 on `redis://127.0.0.1:6379/1` and the Postgres database
-`llmgateway_test` (`postgres://dev:dev@127.0.0.1:5432/llmgateway_test`). Override them with
-`SWITCHYARD_TEST_REDIS_URL` and `SWITCHYARD_TEST_DATABASE_URL`. db 0 is refused. Each test file
-uses its own Redis key prefix and Postgres schema and removes them afterwards; tests never run
-FLUSHDB.
+"Platform on" adds Postgres virtual keys, Redis rate limits, budgets, the Redis cache and the
+usage stream, all checked on every request. The SPEC targets are under 3 ms p50 overhead on a
+miss and under 1 ms on a hit. They are met with the platform off and missed with it on (about
+3.2–3.4 ms and 1.1–1.7 ms across runs). The numbers come from a shared, busy laptop: the
+streaming row's off/on inversion is noise, and RESULTS.md has the profile, an A/B of the fixes
+and the caveats.
 
-Highlights:
+<!-- BENCH:END -->
 
-- Fallback on 503 and on timeout; 429 retried with Retry-After; 400 never retried.
-- Breaker opens and recovers through a half-open probe; total deadline returns 504.
-- Streaming falls back before the first byte; after it, the stream ends with an error event and
-  `[DONE]`.
-- Embedding templates verified upstream; rerank normalization.
-- Anthropic chat, streaming and `tool_use` translation against recorded SSE fixtures and the mock
-  server.
-- The opencode adapter is tested against an in-memory fake that reproduces the real `/event`
-  stream.
-- Rate limits: 100 concurrent calls never exceed the limit, and neither do many keys sharing one
-  team limit. Checks are all-or-nothing across scopes. TPM reservation and reconciliation, and
-  the sliding-window math, are tested with an injected clock.
-- Budgets: 402 at the limit, a soft alert fires exactly once across replicas, reconciliation never
-  lowers counters while events are in flight.
-- Usage: request → stream → worker → Postgres, idempotent redelivery, XAUTOCLAIM after a consumer
-  crash, dead-lettering, partitions and retention.
-- Keys: revocation reaches a second replica through pub/sub; the gateway returns 503 (not 401)
-  when Postgres is down; static keys keep working.
+## How it compares
 
-## Docs
+Switchyard is small and focused. Pick it when you want a self-hosted TypeScript gateway that you
+can read end to end, embed as a library, and run with Redis and Postgres. Pick the others when
+you need their breadth. This is our best understanding as of October 2026; check each project's
+docs, and corrections are welcome.
 
-- [docs/opencode-bridge.md](docs/opencode-bridge.md): how the Copilot bridge works, including the
-  emulation protocols and the live `/event` findings
-- [docs/ADMIN.md](docs/ADMIN.md): platform setup, admin API, CLI, limits, budgets, cache, usage
-  pipeline, Redis key layout, failure modes
-- [docs/METRICS.md](docs/METRICS.md): Prometheus metric reference, PromQL and Postgres queries
-  for dashboards
-- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): image, Docker Compose, Helm, Terraform (kind, EKS
-  example), secrets, Redis sizing, upgrades
-- [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md): dashboards, alert rules, runbooks
-- [docs/STATUS.md](docs/STATUS.md): what exists, test results, deviations, roadmap notes
-- [docs/SPEC.md](docs/SPEC.md): the full specification
+|                                              | Switchyard                                             | [LiteLLM](https://github.com/BerriAI/litellm) | [Portkey Gateway](https://github.com/Portkey-AI/gateway) | [Helicone](https://github.com/Helicone/helicone) |
+| -------------------------------------------- | ------------------------------------------------------ | --------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------ |
+| Language                                     | TypeScript (Hono)                                      | Python                                        | TypeScript (Hono)                                        | TypeScript platform; Rust AI gateway             |
+| Focus                                        | Self-hosted gateway + cost/budget platform             | Broadest provider coverage, proxy + SDK       | Routing gateway; governance in the hosted platform       | Observability first, plus a gateway              |
+| Providers                                    | OpenAI, Anthropic, OpenAI-compatible, opencode, custom | 100+                                          | 200+                                                     | Many, through its gateway                        |
+| Fallback / retries                           | ✓                                                      | ✓                                             | ✓                                                        | ✓                                                |
+| Virtual keys, budgets                        | ✓ (Postgres)                                           | ✓                                             | Mostly in the hosted product                             | Partial                                          |
+| Caching                                      | Exact + semantic (Redis 8)                             | Exact + semantic (several backends)           | Simple + semantic                                        | ✓                                                |
+| Tool / JSON emulation for text-only backends | ✓                                                      | –                                             | –                                                        | –                                                |
+| Embeddable as a library                      | ✓ (Fetch handler)                                      | Python SDK                                    | ✓                                                        | –                                                |
+| UI                                           | Grafana dashboards, CLI, admin API (no web UI)         | Admin UI                                      | Hosted UI                                                | Full web UI                                      |
+| Guardrails, prompt management                | –                                                      | ✓                                             | ✓                                                        | Prompts ✓                                        |
+| Maturity                                     | New (0.x), one maintainer                              | Mature, large community                       | Mature                                                   | Mature                                           |
+
+## Roadmap
+
+- OpenTelemetry traces (`gen_ai.*` conventions). The config keys exist and are marked reserved.
+- Atomic budget reservations, to remove the concurrent-overshoot bound (SR-14), and per-key
+  concurrency limits.
+- Scoped admin tokens and RBAC, with per-token audit attribution.
+- More native providers (Gemini, Bedrock), and hedged requests.
+- Redis Cluster support (hash-tagged keys).
+- Accounting for semantic-cache embedding calls.
+
+Known gaps are tracked in [docs/STATUS.md](docs/STATUS.md#known-gaps).
+
+## Documentation
+
+| Doc                                                | What                                                           |
+| -------------------------------------------------- | -------------------------------------------------------------- |
+| [docs/CONFIG.md](docs/CONFIG.md)                   | Configuration reference (generated from the schema)            |
+| [docs/API.md](docs/API.md)                         | HTTP API: endpoints, headers, `usage.cost`, errors             |
+| [docs/LIBRARY.md](docs/LIBRARY.md)                 | Embedding, custom providers, services, testing                 |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)       | Request lifecycle, components, failure behaviour               |
+| [docs/adr/](docs/adr/README.md)                    | Architecture decision records                                  |
+| [docs/ADMIN.md](docs/ADMIN.md)                     | Teams, keys, limits, budgets, cache, usage pipeline, admin API |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)           | Image, Compose, Helm, Terraform, sizing, upgrades              |
+| [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)     | Dashboards, alerts, runbooks                                   |
+| [docs/METRICS.md](docs/METRICS.md)                 | Metric reference and queries                                   |
+| [docs/opencode-bridge.md](docs/opencode-bridge.md) | The Copilot bridge and its emulation protocols                 |
+| [docs/RELEASING.md](docs/RELEASING.md)             | Release process and one-time setup                             |
+| [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md) | Threat model, findings and residual risks                      |
+| [bench/RESULTS.md](bench/RESULTS.md)               | Benchmark method and results                                   |
+
+## Contributing
+
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev setup
+(`pnpm install && pnpm test`, with Redis and Postgres for the platform tests), changesets and
+conventions. Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
-MIT
+[MIT](LICENSE) © riz1-k

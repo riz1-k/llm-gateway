@@ -17,11 +17,19 @@ export class MemoryUsageSink implements UsageSink {
   }
 }
 
-/** Writes each usage event as a structured log line (`msg: "usage"`). Default in the core. */
+/**
+ * Writes each usage event as a structured log line (`msg: "usage"`). Default in the core (no
+ * Redis). Logs at `debug` by default: the `request completed` line at `info` already carries
+ * team, route, provider, model, status, tokens, cost and cache, and a second line per request
+ * roughly doubled the gateway's logging cost (see bench/RESULTS.md).
+ */
 export class LogUsageSink implements UsageSink {
-  constructor(private readonly logger: Logger) {}
+  constructor(
+    private readonly logger: Logger,
+    private readonly level: 'debug' | 'info' = 'debug',
+  ) {}
   emit(event: UsageEvent): void {
-    this.logger.info({ usage: event }, 'usage');
+    this.logger[this.level]({ usage: event }, 'usage');
   }
 }
 

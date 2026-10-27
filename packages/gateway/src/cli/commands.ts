@@ -23,12 +23,16 @@ const out = (s = ''): void => {
   process.stdout.write(`${s}\n`);
 };
 
+/** --config → $SWITCHYARD_CONFIG → ./gateway.yaml (if it exists). */
 const configPathOf = (v: string | undefined): string | undefined =>
-  v ?? process.env.SWITCHYARD_CONFIG;
+  v ?? process.env.SWITCHYARD_CONFIG ?? (existsSync('gateway.yaml') ? 'gateway.yaml' : undefined);
 
 function requireConfig(v: string | undefined, cmd: string): ResolvedConfig {
   const path = configPathOf(v);
-  if (!path) throw new Error(`${cmd} requires --config <file> (or SWITCHYARD_CONFIG)`);
+  if (!path)
+    throw new Error(
+      `${cmd} needs a config: pass --config <file>, set SWITCHYARD_CONFIG, or create ./gateway.yaml (switchyard init)`,
+    );
   return loadConfig(path);
 }
 

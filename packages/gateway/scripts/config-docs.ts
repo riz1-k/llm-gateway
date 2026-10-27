@@ -1,0 +1,252 @@
+/**
+ * Generates docs/CONFIG.md (the configuration reference) from the same JSON Schema as
+ * `config.schema.json`, so the reference can never drift from the zod schema.
+ *
+ *   pnpm --filter switchyard-gateway schema         # writes config.schema.json and docs/CONFIG.md
+ *   pnpm --filter switchyard-gateway schema:check   # exit 1 when either file is stale
+ */
+import { readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import * as prettier from 'prettier';
+import { buildConfigSchema } from './config-schema.js';
+
+type Node = Record<string, unknown>;
+
+export const DOCS_PATH = fileURLToPath(new URL('../../../docs/CONFIG.md', import.meta.url));
+
+const isNode = (v: unknown): v is Node => typeof v === 'object' && v !== null && !Array.isArray(v);
+const isInterpolated = (v: unknown): boolean => isNode(v) && v.$ref === '#/$defs/interpolated';
+const cell = (s: string): string => s.replace(/\|/g, '\\|').replace(/\n+/g, ' ');
+
+/** The value schema without the `${VAR}` alternative. */
+function unwrap(node: Node): Node {
+  if (Array.isArray(node.anyOf)) {
+    const rest = (node.anyOf as Node[]).filter((n) => !isInterpolated(n));
+    if (rest.length === 1) return { ...node, ...rest[0], anyOf: undefined };
+    return { ...node, anyOf: rest };
+  }
+  return node;
+}
+
+function typeOf(raw: Node): string {
+  const node = unwrap(raw);
+  if (node.const !== undefined) return `\`${JSON.stringify(node.const)}\``;
+  if (Array.isArray(node.enum))
+    return (node.enum as unknown[]).map((e) => `\`${JSON.stringify(e)}\``).join(' \\| ');
+  const alts = (node.anyOf ?? node.oneOf) as Node[] | undefined;
+  if (Array.isArray(alts)) {
+    const tagged = alts.every((a) => isNode(a.properties) && isNode(a.properties.type));
+    if (tagged) return 'object (by `type`)';
+    return [...new Set(alts.map(typeOf))].join(' \\| ');
+  }
+  const t = node.type;
+  if (t === 'array') {
+    if (!isNode(node.items)) return 'array';
+    const item = typeOf(node.items);
+    return item.includes(' \\| ') ? `(${item})[]` : `${item}[]`;
+  }
+  if (t === 'object') {
+    if (!node.properties && isNode(node.additionalProperties))
+      return `map of ${typeOf(node.additionalProperties)}`;
+    return 'object';
+  }
+  if (t === 'integer' || t === 'number') {
+    const parts: string[] = [];
+    const bound = (k: string): number | undefined =>
+      typeof node[k] === 'number' ? node[k] : undefined;
+    const [min, exMin, max] = [bound('minimum'), bound('exclusiveMinimum'), bound('maximum')];
+    if (min !== undefined) parts.push(`≥ ${min}`);
+    if (exMin !== undefined) parts.push(`> ${exMin}`);
+    if (max !== undefined) parts.push(`≤ ${max}`);
+    return parts.length ? `${t} (${parts.join(', ')})` : String(t);
+  }
+  if (t === 'string' && typeof node.format === 'string') return `string (${node.format})`;
+  if (Array.isArray(t)) return t.join(' \\| ');
+  return typeof t === 'string' ? t : 'any';
+}
+
+function defaultOf(node: Node): string {
+  if (!('default' in node)) return '';
+  const d = node.default;
+  if (isNode(d) && Object.keys(d).length === 0) return '';
+  const json = JSON.stringify(d);
+  return json.length > 60 ? '(see description)' : `\`${json}\``;
+}
+
+interface Row {
+  path: string;
+  type: string;
+  def: string;
+  desc: string;
+}
+
+/** Flattens an object schema into dotted-path rows (`a.b.c`, `list[].field`). */
+function rows(node: Node, prefix: string, out: Row[] = []): Row[] {
+  const props = isNode(node.properties) ? node.properties : {};
+  for (const [key, rawChild] of Object.entries(props)) {
+    if (!isNode(rawChild)) continue;
+    const child = unwrap(rawChild);
+    const path = prefix ? `${prefix}.${key}` : key;
+    const desc = typeof rawChild.description === 'string' ? rawChild.description : '';
+    out.push({ path, type: typeOf(rawChild), def: defaultOf(rawChild), desc });
+    if (child.type === 'object' && isNode(child.properties)) rows(child, path, out);
+    else if (child.type === 'array' && isNode(child.items) && isNode(child.items.properties))
+      rows(child.items, `${path}[]`, out);
+    else if (child.type === 'array' && isNode(child.items) && Array.isArray(child.items.anyOf))
+      for (const alt of child.items.anyOf as Node[])
+        if (isNode(alt.properties)) rows(alt, `${path}[]`, out);
+    // unions of object shapes flatten into the same path
+    if (Array.isArray(child.anyOf))
+      for (const alt of child.anyOf as Node[])
+        if (isNode(alt) && isNode(alt.properties)) rows(alt, path, out);
+  }
+  return out;
+}
+
+function table(list: Row[]): string {
+  if (list.length === 0) return '';
+  const seen = new Set<string>();
+  const lines = ['| Key | Type | Default | Description |', '| --- | --- | --- | --- |'];
+  for (const r of list) {
+    if (seen.has(r.path)) continue;
+    seen.add(r.path);
+    lines.push(`| \`${r.path}\` | ${r.type} | ${r.def} | ${cell(r.desc)} |`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+const INTRO = `# Configuration reference
+
+<!-- Generated by packages/gateway/scripts/config-docs.ts from the zod schema. Do not edit by
+     hand: run \`pnpm --filter switchyard-gateway schema\` (CI fails when this file is stale). -->
+
+Switchyard reads one YAML file. The CLI looks for \`--config <file>\`, then \`$SWITCHYARD_CONFIG\`,
+then \`./gateway.yaml\`. \`switchyard init\` writes a starter file, and
+[config/gateway.example.yaml](../config/gateway.example.yaml) is a fully commented example.
+
+- **Environment interpolation:** every string value supports \`\${VAR}\` (an error if unset),
+  \`\${VAR:-default}\` (the default if unset or empty) and \`\${VAR-default}\` (the default only if
+  unset). Write \`$\${\` for a literal \`\${\`. Interpolation runs on parsed values, never on raw
+  text, and before validation, so numbers and booleans can come from the environment too. A
+  \`./.env\` file (or \`--env-file\`) is loaded first; real environment variables win.
+- **Validation:** \`switchyard validate-config [file]\` reports errors with their paths, for
+  example \`routes.chat.targets[1]: unknown model "missing"\`. Unknown keys are ignored at
+  runtime, but the JSON Schema flags them in editors.
+- **Editor support:** add this first line to get completion, hover docs and typo detection in
+  any editor with the YAML language server (VS Code, JetBrains, Neovim, …):
+
+  \`\`\`yaml
+  # yaml-language-server: $schema=https://unpkg.com/switchyard-gateway/config.schema.json
+  \`\`\`
+
+  The schema also ships in the package as \`switchyard-gateway/config.schema.json\`.
+
+- **Reload:** \`SIGHUP\` or \`POST /admin/config/reload\` swaps providers, models and routes
+  atomically. Connection settings (\`server\`, \`redis\`, \`database\`) need a restart.
+
+Durations are in milliseconds (\`*_ms\`) or seconds (\`*_s\`), and money is in USD.
+`;
+
+/** Section order and headings; every top-level key must appear (checked). */
+const SECTIONS: [key: string, title: string][] = [
+  ['server', 'Server'],
+  ['auth', 'Authentication'],
+  ['providers', 'Providers'],
+  ['models', 'Models'],
+  ['routes', 'Routes'],
+  ['retry', 'Retries'],
+  ['breaker', 'Circuit breakers'],
+  ['pricing_file', 'Pricing'],
+  ['redis', 'Redis'],
+  ['database', 'Postgres'],
+  ['limits', 'Rate limits'],
+  ['budgets', 'Budgets'],
+  ['usage', 'Usage pipeline'],
+  ['metrics', 'Metrics'],
+  ['observability', 'Logging and observability'],
+];
+
+export function renderConfigDocsRaw(schema: Node = buildConfigSchema()): string {
+  const props = schema.properties as Record<string, Node>;
+  const required = new Set((schema.required as string[] | undefined) ?? []);
+  const missing = Object.keys(props).filter((k) => !SECTIONS.some(([s]) => s === k));
+  if (missing.length) throw new Error(`config-docs: no section for ${missing.join(', ')}`);
+  const parts = [INTRO];
+  parts.push('## Top-level keys\n');
+  parts.push(
+    table(
+      SECTIONS.map(([key]) => ({
+        path: key,
+        type: typeOf(props[key]!),
+        def: required.has(key) ? '**required**' : defaultOf(props[key]!),
+        desc: (props[key]!.description as string | undefined) ?? '',
+      })),
+    ),
+  );
+  for (const [key, title] of SECTIONS) {
+    const raw = props[key]!;
+    const node = unwrap(raw);
+    const scalar =
+      !(node.type === 'object' && isNode(node.properties)) && !isNode(node.additionalProperties);
+    parts.push(`## ${title}: \`${key}\`\n`);
+    if (typeof raw.description === 'string' && !scalar) parts.push(`${raw.description}\n`);
+    if (node.type === 'object' && isNode(node.properties)) {
+      parts.push(table(rows(node, key)));
+      continue;
+    }
+    const value = isNode(node.additionalProperties) ? node.additionalProperties : undefined;
+    if (!value) {
+      const desc = typeof raw.description === 'string' ? raw.description : '';
+      parts.push(table([{ path: key, type: typeOf(raw), def: defaultOf(raw), desc }]));
+      continue;
+    }
+    const variants = Array.isArray(value.oneOf) ? (value.oneOf as Node[]) : undefined;
+    if (variants) {
+      parts.push(
+        `A map from your provider name to its settings. \`type\` selects the adapter:\n\n` +
+          variants
+            .map((v) => {
+              const t = (v.properties as Record<string, Node>).type!;
+              return `- \`${String(t.const)}\`: ${(t.description as string | undefined) ?? ''}`;
+            })
+            .join('\n') +
+          '\n',
+      );
+      for (const v of variants) {
+        const t = (v.properties as Record<string, Node>).type!;
+        parts.push(`### \`type: ${String(t.const)}\`\n`);
+        const list = rows(v, `${key}.<name>`).filter((r) => !r.path.endsWith('.type'));
+        parts.push(table(list));
+      }
+      continue;
+    }
+    parts.push(`A map from the ${key.replace(/s$/, '')} name to its settings.\n`);
+    parts.push(table(rows(value, `${key}.<name>`)));
+  }
+  return parts.join('\n');
+}
+
+export async function renderConfigDocs(): Promise<string> {
+  const options = (await prettier.resolveConfig(DOCS_PATH)) ?? {};
+  return prettier.format(renderConfigDocsRaw(), { ...options, parser: 'markdown' });
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  const next = await renderConfigDocs();
+  if (process.argv.includes('--check')) {
+    let current = '';
+    try {
+      current = readFileSync(DOCS_PATH, 'utf8');
+    } catch {
+      /* missing → stale */
+    }
+    if (current !== next) {
+      console.error('✖ docs/CONFIG.md is stale: run `pnpm --filter switchyard-gateway schema`');
+      process.exit(1);
+    }
+    console.log('✔ docs/CONFIG.md is up to date');
+  } else {
+    writeFileSync(DOCS_PATH, next);
+    console.log(`wrote ${DOCS_PATH}`);
+  }
+}

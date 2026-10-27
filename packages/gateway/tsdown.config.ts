@@ -7,7 +7,7 @@ export default defineConfig({
   target: 'node22',
   tsconfig: 'tsconfig.build.json',
   dts: { tsc: { eager: true } },
-  sourcemap: true,
+  sourcemap: false,
   clean: true,
   fixedExtension: false,
   // The private workspace package is bundled into the published artifact.

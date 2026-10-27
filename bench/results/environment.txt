@@ -1,0 +1,11 @@
+date: 2026-10-27T14:20:23+05:30
+host: Linux 7.0.0-38-generic x86_64
+cpu: 11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz (8 logical CPUs)
+memory: 15219 MiB
+node: v24.20.0  k6: k6 v2.3.0 (commit/e088784614, go1.26.8, linux/amd64)
+redis: 8.0.5  postgres: 18.6 (Ubuntu 18.6-0ubuntu0.26.04.1)
+gateway: 0.1.0 pinned to CPU 2; mock + k6 pinned to CPU 3
+rate runs: 200 req/s for 15s; max-throughput runs: 32 VUs for 10s
+gateway logs: info level (one request line + one usage line per request) to /dev/null
+load average at start: 5.19 7.12 6.52
+load average at end: 4.08 5.52 6.04

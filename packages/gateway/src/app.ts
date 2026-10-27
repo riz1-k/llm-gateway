@@ -4,7 +4,7 @@ import { HTTPException } from 'hono/http-exception';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { platformAdminRoutes } from './admin/routes.js';
 import { extractBearer, secretsEqual, StaticKeyStore } from './auth/keys.js';
-import { NoopCacheStore } from './cache/store.js';
+import { MemoryCacheStore } from './cache/store.js';
 import { parseCacheMode } from './cache/keys.js';
 import type { ResolvedConfig } from './config/resolve.js';
 import { GatewayError } from './core/errors.js';
@@ -27,6 +27,7 @@ import { ConcurrencyManager } from './resilience/concurrency.js';
 import type { Random } from './resilience/retry.js';
 import { LogUsageSink } from './usage/sinks.js';
 
+/** Options for `createGateway`. Only `config` is required. */
 export interface CreateGatewayOptions {
   config: ResolvedConfig;
   /** Override any subsystem (wave H plugs Redis/Postgres implementations in here). */
@@ -68,6 +69,7 @@ interface Snapshot {
   retired: boolean;
 }
 
+/** A running gateway: the Hono app plus lifecycle (reload, drain, close) and its services. */
 export interface Gateway {
   readonly app: Hono<Env>;
   /** Fetch handler (usable with any Fetch-API server or `app.request`). */
@@ -151,7 +153,8 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
     keys: provided.keys ?? new StaticKeyStore(opts.config.raw.auth.static_keys),
     rateLimiter: provided.rateLimiter ?? new NoopRateLimiter(),
     budgets: provided.budgets ?? new NoopBudgetGuard(),
-    cache: provided.cache ?? new NoopCacheStore(),
+    // Without Redis, route `cache:` settings still work, per process (bounded LRU, 1000 entries).
+    cache: provided.cache ?? new MemoryCacheStore(),
     usage: provided.usage ?? new LogUsageSink(logger.child({ component: 'usage' })),
     breakers: provided.breakers ?? new MemoryBreakerStore(opts.clock),
     semantic: provided.semantic,

@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../packages/gateway/config.schema.json
 # Switchyard — local development config for this machine (devenv).
 #   opencode bridge  :4096  (GitHub Copilot models; creds from devenv/.env)
 #   llama.cpp        :8081 chat (optional) · :8082 embeddings · :8083 rerank

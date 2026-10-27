@@ -1,6 +1,7 @@
 import type { Pricing } from '../config/schema.js';
 import type { Usage } from '../core/types.js';
 
+/** Cost of one request split by token class (USD). */
 export interface CostBreakdown {
   costUsd: number;
   inputUsd: number;
@@ -44,7 +45,9 @@ export function computeCost(usage: Usage | undefined, pricing: Pricing | undefin
   return { costUsd, inputUsd, cachedInputUsd, cacheWriteUsd, outputUsd, requestUsd, priced: true };
 }
 
-/** Pre-flight upper bound: estimated prompt at full input price + max completion at output price. */
+/**
+ * Pre-flight upper bound: estimated prompt at full input price + max completion at output price.
+ */
 export function estimateCost(
   promptTokens: number,
   maxCompletionTokens: number,

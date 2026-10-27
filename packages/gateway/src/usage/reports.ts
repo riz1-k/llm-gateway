@@ -1,8 +1,10 @@
 import type { Database } from '../db/client.js';
 
 export const GROUP_BY = ['day', 'team', 'route', 'model', 'provider', 'key'] as const;
+/** Dimension of a usage report. */
 export type GroupBy = (typeof GROUP_BY)[number];
 
+/** Filters and grouping for `queryUsage` (`GET /admin/usage`). */
 export interface UsageQuery {
   team?: string | undefined;
   route?: string | undefined;
@@ -30,6 +32,7 @@ export interface UsageRow {
   avg_latency_ms: number;
 }
 
+/** Aggregated usage rows returned by `queryUsage`. */
 export interface UsageReport {
   query: UsageQuery;
   rows: UsageRow[];

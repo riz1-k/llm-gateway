@@ -11,8 +11,11 @@ TOOLS_DIR    ?= $(or $(TMPDIR),/tmp)/switchyard-tools
 DEMO_SECONDS ?= 120
 CHART        := deploy/helm/switchyard
 GRAFANA_URL  ?= http://127.0.0.1:3301
+# Optional env file (gitignored) sourced by dev/test-live; override with ENV_FILE=/path/to/.env
+ENV_FILE     ?= .env
 
 .PHONY: help install build test test-live lint typecheck dev mock validate clean \
+        schema check-package pack-smoke verdaccio-e2e bench \
         image compose-up compose-demo compose-down compose-stop compose-logs compose-ps \
         dashboards dashboards-check screenshots chart-sync tools lint-alerts lint-helm lint-terraform lint-workflows lint-secrets audit lint-infra \
         k8s-up k8s-demo k8s-down
@@ -30,8 +33,8 @@ build:              ## build all packages
 test:               ## unit + integration tests (needs local Redis/Postgres)
 	pnpm test
 
-test-live:          ## opt-in: ≤ 6 real Copilot calls through the opencode bridge
-	bash -c 'set -a; source ../devenv/.env; set +a; pnpm test:live'
+test-live:          ## opt-in: ≤ 6 real calls via the opencode bridge (OPENCODE_* from env or ENV_FILE, default .env)
+	bash -c 'set -a; if [ -f "$(ENV_FILE)" ]; then source "$(ENV_FILE)"; fi; set +a; pnpm test:live'
 
 lint:               ## eslint + prettier
 	pnpm lint
@@ -39,8 +42,8 @@ lint:               ## eslint + prettier
 typecheck:          ## tsc --noEmit
 	pnpm typecheck
 
-dev:                ## gateway on :8787 with config/gateway.local.yaml
-	scripts/dev.sh
+dev:                ## gateway on :8787 with config/gateway.local.yaml (env: ENV_FILE, default .env)
+	SWITCHYARD_ENV_FILE="$(ENV_FILE)" scripts/dev.sh
 
 mock:               ## standalone mock provider on :8790
 	pnpm mock
@@ -50,6 +53,24 @@ validate:           ## validate config/gateway.local.yaml
 
 clean:
 	rm -rf packages/*/dist packages/*/coverage
+
+# ── package & release checks (nothing is published) ──────────────────────────────────────────
+schema:             ## regenerate config.schema.json + docs/CONFIG.md from the zod schema
+	pnpm --filter switchyard-gateway run schema
+
+check-package:      ## schema/docs in sync, TSDoc on public API, publint, attw (after build)
+	pnpm check:package
+
+pack-smoke: build   ## pack the npm tarball, install it in an empty project, run CLI/server/library
+	rm -rf $(TOOLS_DIR)/pack && mkdir -p $(TOOLS_DIR)/pack
+	cd packages/gateway && pnpm pack --pack-destination $(TOOLS_DIR)/pack
+	OPENAI_SDK=$${OPENAI_SDK:-7.45.0} scripts/pack-smoke.sh $(TOOLS_DIR)/pack/switchyard-gateway-*.tgz
+
+verdaccio-e2e: build ## publish to a throwaway local verdaccio registry and test the installed package
+	scripts/verdaccio-e2e.sh
+
+bench: build        ## k6 benchmarks vs a 0 ms mock (needs k6; see bench/README.md)
+	bench/run.sh
 
 # ── container image & docker compose ─────────────────────────────────────────────────────────
 image:              ## build the container image ($(IMAGE))

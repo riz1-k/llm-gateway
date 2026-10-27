@@ -21,6 +21,7 @@ interface Bucket {
   fail: number;
 }
 
+/** Persisted state of one breaker (rolling window buckets, streak, cooldown). */
 export interface BreakerState {
   state: CircuitState;
   consecutiveFailures: number;
@@ -32,6 +33,7 @@ export interface BreakerState {
   buckets: Bucket[];
 }
 
+/** Whether a target may be called now (closed, half-open probe, or open). */
 export interface BreakerDecision {
   allowed: boolean;
   state: CircuitState;
@@ -172,6 +174,7 @@ export function record(
   return tripByRate || tripByStreak ? open(next, now, cfg) : next;
 }
 
+/** Breaker state of one target as reported by `/admin/providers/health`. */
 export interface BreakerSnapshot {
   target: string;
   state: CircuitState;
@@ -197,6 +200,9 @@ export interface BreakerStore {
   reset(target?: string): Promise<void>;
 }
 
+/**
+ * Single-process breaker store (default without Redis; `createPlatform` shares state via Redis).
+ */
 export class MemoryBreakerStore implements BreakerStore {
   private readonly states = new Map<string, BreakerState>();
   constructor(private readonly clock: () => number = Date.now) {}

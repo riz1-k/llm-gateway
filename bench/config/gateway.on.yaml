@@ -1,0 +1,48 @@
+# yaml-language-server: $schema=../../packages/gateway/config.schema.json
+# Benchmark config, platform ON: Postgres virtual keys, Redis sliding-window RPM/TPM limits (key +
+# team), hard team budgets (pre-flight + reconciliation), Redis exact cache, usage events on a
+# Redis stream with the in-process writer batching them into Postgres. Limits and budgets are set
+# high enough never to trigger, but every check still runs on every request.
+# bench/run.sh points it at Redis db 1 / a throwaway database.
+server:
+  port: ${PORT:-18789}
+  host: 127.0.0.1
+redis:
+  url: ${REDIS_URL:-redis://localhost:6379/1}
+  key_prefix: 'sybench:'
+database:
+  url: ${DATABASE_URL:-postgres://dev:dev@localhost:5432/llmgateway_bench}
+auth:
+  admin_token: ${SWITCHYARD_ADMIN_TOKEN:-}
+providers:
+  upstream:
+    type: openai-compatible
+    base_url: ${MOCK_URL:-http://127.0.0.1:18790/v1}
+    supports_stream_usage: true
+models:
+  echo:
+    provider: upstream
+    model: mock-echo
+    pricing: { input: 2.5, output: 10 }
+  embedder:
+    provider: upstream
+    model: mock-embed
+    kind: embedding
+    pricing: { input: 0.02 }
+routes:
+  chat:
+    targets: [echo]
+    cache: { exact: { ttl_s: 300 } }
+  embed:
+    targets: [embedder]
+    cache: { exact: { ttl_s: 300 } }
+limits:
+  defaults:
+    key: { rpm: 10000000, tpm: 1000000000 }
+    team: { rpm: 10000000, tpm: 1000000000 }
+budgets: { enforcement: hard }
+usage:
+  stream: 'sybench:usage'
+  in_process_writer: true
+metrics: { enabled: true, path: /metrics }
+observability: { log_level: '${LOG_LEVEL:-info}' }

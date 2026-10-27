@@ -7,6 +7,9 @@ import { createLogger, type Logger } from './observability/logger.js';
 import { PromMetrics } from './observability/metrics.js';
 import { createPlatform, type Platform } from './platform/index.js';
 
+/**
+ * Options for `startServer`: a config file path plus any `createGateway` option except `config`.
+ */
 export interface StartServerOptions extends Partial<
   Omit<CreateGatewayOptions, 'config' | 'platform'>
 > {
@@ -23,6 +26,71 @@ export interface StartServerOptions extends Partial<
   platform?: Platform | boolean;
 }
 
+/** Strips credentials from a connection URL before it is logged. */
+export function redactUrl(url: string | undefined): string {
+  if (!url) return '(unset)';
+  try {
+    const u = new URL(url);
+    if (u.password) u.password = '***';
+    return u.toString();
+  } catch {
+    return '(unparseable url)';
+  }
+}
+
+/**
+ * Checks Redis/Postgres once with actionable hints, then starts the platform without letting an
+ * unreachable Redis block the listener (the subscription completes once Redis is back).
+ */
+async function startPlatform(
+  platform: Platform,
+  config: ReturnType<typeof loadConfig>,
+  logger: Logger,
+): Promise<void> {
+  const raw = config.raw;
+  const checks = await platform.readiness();
+  if (checks.redis && !checks.redis.ok) {
+    logger.warn(
+      {
+        redis: redactUrl(raw.redis?.url),
+        hint:
+          'Start Redis 8+, fix redis.url, or remove redis.url to run in-memory. Until then ' +
+          (raw.redis?.fail_open === false
+            ? 'rate-limited and budgeted requests get 503 (redis.fail_open: false).'
+            : 'rate limits, budgets and the shared cache are skipped (redis.fail_open: true).'),
+      },
+      'Redis is unreachable',
+    );
+  }
+  if (checks.postgres && !checks.postgres.ok) {
+    logger.warn(
+      {
+        postgres: redactUrl(raw.database?.url),
+        hint:
+          'Start Postgres or fix database.url, then run `switchyard migrate`. Until then ' +
+          'database keys and the admin data API answer 503; static keys keep working.',
+      },
+      'Postgres is unreachable',
+    );
+  }
+  const timeoutMs = raw.redis?.connect_timeout_ms ?? 5_000;
+  let timer: NodeJS.Timeout | undefined;
+  const started = await Promise.race([
+    platform.start().then(() => true),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+      timer.unref();
+    }),
+  ]);
+  clearTimeout(timer);
+  if (!started)
+    logger.warn(
+      { timeout_ms: timeoutMs },
+      'platform still connecting; serving now (key invalidation and the in-process usage writer start once Redis is reachable)',
+    );
+}
+
+/** Handle returned by `startServer`. */
 export interface RunningServer {
   gateway: Gateway;
   url: string;
@@ -42,6 +110,10 @@ const waitFor = async (cond: () => boolean, timeoutMs: number): Promise<boolean>
   return true;
 };
 
+/**
+ * Loads the config, creates the platform layer (when Redis/Postgres are configured) and the
+ * gateway, and serves it over HTTP with graceful shutdown. This is what `switchyard serve` runs.
+ */
 export async function startServer(opts: StartServerOptions): Promise<RunningServer> {
   const config = loadConfig(opts.configPath);
   const logger = opts.logger ?? createLogger({ level: config.raw.observability.log_level });
@@ -52,7 +124,7 @@ export async function startServer(opts: StartServerOptions): Promise<RunningServ
       : opts.platform !== false && wantsPlatform
         ? createPlatform(config, { logger })
         : undefined;
-  await platform?.start();
+  if (platform) await startPlatform(platform, config, logger);
   const { platform: _ignored, ...rest } = opts;
   void _ignored;
   const gateway = createGateway({

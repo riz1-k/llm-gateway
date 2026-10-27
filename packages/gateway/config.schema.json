@@ -1,0 +1,2200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unpkg.com/switchyard-gateway/config.schema.json",
+  "title": "Switchyard gateway configuration (gateway.yaml)",
+  "description": "Configuration of the Switchyard LLM gateway. `${VAR}` and `${VAR:-default}` are replaced from the environment before validation. Reference: docs/CONFIG.md.",
+  "type": "object",
+  "properties": {
+    "server": {
+      "description": "HTTP server.",
+      "default": {},
+      "type": "object",
+      "properties": {
+        "port": {
+          "default": 8787,
+          "description": "Listen port (`PORT` env / `--port` override it).",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "host": {
+          "default": "0.0.0.0",
+          "description": "Bind address.",
+          "type": "string"
+        },
+        "request_timeout_ms": {
+          "default": 300000,
+          "description": "Hard cap for one request, streams included.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "body_limit_mb": {
+          "default": 10,
+          "description": "Max request body size.",
+          "anyOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "shutdown_grace_ms": {
+          "default": 15000,
+          "description": "How long SIGTERM waits for in-flight requests to drain.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "redis": {
+      "description": "Redis (optional; without it everything is in-memory, per process).",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "Redis 8 URL. Enables shared limits, budgets, caches, breakers and the usage stream.",
+          "type": "string"
+        },
+        "key_prefix": {
+          "default": "sy:",
+          "description": "Prefix of every Redis key.",
+          "type": "string"
+        },
+        "fail_open": {
+          "default": true,
+          "description": "Admit requests when Redis is unreachable (rate limits / budgets are skipped, logged).",
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "connect_timeout_ms": {
+          "default": 5000,
+          "description": "Connect timeout of the Redis clients.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "database": {
+      "description": "Postgres (optional; required for database keys, budgets and usage reports).",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "Postgres URL. Enables database keys/teams/budgets, the usage ledger and the admin API.",
+          "type": "string"
+        },
+        "pool_max": {
+          "default": 10,
+          "description": "Connection pool size.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 100
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "auth": {
+      "description": "Client authentication.",
+      "default": {},
+      "type": "object",
+      "properties": {
+        "admin_token": {
+          "description": "Bearer token of the admin API (`SWITCHYARD_ADMIN_TOKEN`); admin API is off when unset.",
+          "type": "string"
+        },
+        "static_keys": {
+          "description": "Keys defined in config (bootstrap/dev/CI); database keys are the normal path.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "description": "The key, ≥ 12 characters (use `${ENV}`); entries with an empty key are skipped with a warning.",
+                "type": "string"
+              },
+              "team": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Team slug the key belongs to."
+              },
+              "name": {
+                "default": "static",
+                "description": "Label used in logs and usage reports.",
+                "type": "string"
+              },
+              "allowed_routes": {
+                "description": "Route names this key may call; omitted = all routes.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "allow_direct_models": {
+                "default": false,
+                "description": "Allow calling `models:` entries directly by name (not only routes).",
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "rpm": {
+                "description": "Requests per minute for this key.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "tpm": {
+                "description": "Tokens per minute for this key.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "team"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "key_cache_ttl_s": {
+          "default": 60,
+          "description": "TTL of the Redis key-record cache (DB keys). Revocation is pushed via pub/sub.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "local_key_cache_ttl_ms": {
+          "default": 5000,
+          "description": "TTL of the per-process key cache in front of Redis.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "pricing_file": {
+      "description": "Path to the pricing table (relative to the config file).",
+      "type": "string"
+    },
+    "breaker": {
+      "description": "Circuit breaker defaults (per target).",
+      "default": {},
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Enable per-target circuit breakers.",
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "window_s": {
+          "default": 30,
+          "description": "Rolling window for the failure rate.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "min_requests": {
+          "default": 10,
+          "description": "Minimum requests in the window before the failure rate can trip the breaker.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "failure_rate": {
+          "default": 0.5,
+          "description": "Failure rate (0..1) that opens the breaker.",
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "consecutive_failures": {
+          "default": 5,
+          "description": "Consecutive failures that open the breaker regardless of the rate.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "cooldown_s": {
+          "default": 30,
+          "description": "First open period; doubles on every re-trip.",
+          "anyOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "max_cooldown_s": {
+          "default": 300,
+          "description": "Cap of the open period.",
+          "anyOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "retry": {
+      "description": "Retry defaults (routes may override).",
+      "default": {},
+      "type": "object",
+      "properties": {
+        "attempts": {
+          "default": 2,
+          "description": "Total attempts per target (1 = no retry).",
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 10
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "backoff_ms": {
+          "default": 250,
+          "description": "Base delay of exponential backoff with full jitter.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "max_backoff_ms": {
+          "default": 4000,
+          "description": "Cap of the backoff delay.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "max_retry_after_ms": {
+          "default": 20000,
+          "description": "Upper bound for honoring upstream Retry-After.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "providers": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "opencode",
+                "description": "Bridge to an `opencode serve` instance (e.g. GitHub Copilot models)."
+              },
+              "enabled": {
+                "default": true,
+                "description": "Set false to disable the provider (and its models).",
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "max_concurrency": {
+                "default": 0,
+                "description": "Maximum concurrent upstream requests for this provider (0 = unlimited).",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "queue_timeout_ms": {
+                "default": 30000,
+                "description": "How long a request may wait for a concurrency slot before failing with `upstream_busy`.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "timeout_ms": {
+                "default": 120000,
+                "description": "Per-attempt upstream timeout.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "headers": {
+                "default": {},
+                "description": "Extra headers sent upstream.",
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "base_url": {
+                "default": "http://127.0.0.1:4096",
+                "description": "opencode server URL.",
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "username": {
+                "default": "opencode",
+                "description": "Basic-auth user of the opencode server.",
+                "type": "string"
+              },
+              "password": {
+                "description": "Basic-auth password (`OPENCODE_SERVER_PASSWORD`).",
+                "type": "string"
+              },
+              "agent": {
+                "default": "gateway",
+                "description": "opencode agent used for every session (should have all built-in tools disabled).",
+                "type": "string"
+              },
+              "upstream_provider": {
+                "default": "github-copilot",
+                "description": "opencode providerID for upstream models.",
+                "type": "string"
+              },
+              "session_title": {
+                "default": "switchyard",
+                "description": "Title prefix of the (always deleted) per-request sessions.",
+                "type": "string"
+              },
+              "streaming": {
+                "default": "events",
+                "description": "`events`: true streaming via opencode's /event SSE; `synthetic`: await then chunk.",
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "events",
+                      "synthetic"
+                    ]
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "repair_attempts": {
+                "default": 1,
+                "description": "Max repair round-trips for emulated tool calls / JSON mode.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 3
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "temperature_models": {
+                "default": [],
+                "description": "Models that accept temperature/top_p (others have these params dropped).",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "openai-compatible",
+                "description": "Any OpenAI-compatible server: llama.cpp, vLLM, Ollama, Groq, OpenRouter, …"
+              },
+              "enabled": {
+                "default": true,
+                "description": "Set false to disable the provider (and its models).",
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "max_concurrency": {
+                "default": 0,
+                "description": "Maximum concurrent upstream requests for this provider (0 = unlimited).",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "queue_timeout_ms": {
+                "default": 30000,
+                "description": "How long a request may wait for a concurrency slot before failing with `upstream_busy`.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "timeout_ms": {
+                "default": 120000,
+                "description": "Per-attempt upstream timeout.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "headers": {
+                "default": {},
+                "description": "Extra headers sent upstream.",
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "base_url": {
+                "description": "API base URL including `/v1` (models may override it).",
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "api_key": {
+                "description": "Bearer token, if the server needs one.",
+                "type": "string"
+              },
+              "supports_tools": {
+                "default": true,
+                "description": "Whether the upstream supports native `tools` (llama.cpp with --jinja does).",
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "supports_stream_usage": {
+                "default": true,
+                "description": "Whether the upstream supports `stream_options.include_usage`.",
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "type",
+              "base_url"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "openai",
+                "description": "OpenAI API (native passthrough)."
+              },
+              "enabled": {
+                "default": true,
+                "description": "Set false to disable the provider (and its models).",
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "max_concurrency": {
+                "default": 0,
+                "description": "Maximum concurrent upstream requests for this provider (0 = unlimited).",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "queue_timeout_ms": {
+                "default": 30000,
+                "description": "How long a request may wait for a concurrency slot before failing with `upstream_busy`.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "timeout_ms": {
+                "default": 120000,
+                "description": "Per-attempt upstream timeout.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "headers": {
+                "default": {},
+                "description": "Extra headers sent upstream.",
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "base_url": {
+                "default": "https://api.openai.com/v1",
+                "description": "API base URL.",
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "api_key": {
+                "description": "OpenAI API key (`OPENAI_API_KEY`).",
+                "type": "string"
+              },
+              "organization": {
+                "description": "`OpenAI-Organization` header.",
+                "type": "string"
+              },
+              "project": {
+                "description": "`OpenAI-Project` header.",
+                "type": "string"
+              },
+              "enabled_if_key": {
+                "default": false,
+                "description": "Disable this provider automatically when `api_key` is empty.",
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "anthropic",
+                "description": "Anthropic Messages API (translated from/to OpenAI shape)."
+              },
+              "enabled": {
+                "default": true,
+                "description": "Set false to disable the provider (and its models).",
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "max_concurrency": {
+                "default": 0,
+                "description": "Maximum concurrent upstream requests for this provider (0 = unlimited).",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "queue_timeout_ms": {
+                "default": 30000,
+                "description": "How long a request may wait for a concurrency slot before failing with `upstream_busy`.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "timeout_ms": {
+                "default": 120000,
+                "description": "Per-attempt upstream timeout.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "headers": {
+                "default": {},
+                "description": "Extra headers sent upstream.",
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "base_url": {
+                "default": "https://api.anthropic.com",
+                "description": "API base URL.",
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "api_key": {
+                "description": "Anthropic API key (`ANTHROPIC_API_KEY`).",
+                "type": "string"
+              },
+              "anthropic_version": {
+                "default": "2023-06-01",
+                "description": "`anthropic-version` header.",
+                "type": "string"
+              },
+              "default_max_tokens": {
+                "default": 4096,
+                "description": "`max_tokens` is mandatory for Anthropic; used when neither request nor route sets one.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "json_mode": {
+                "default": "tool",
+                "description": "How `response_format: json_schema` is implemented.",
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "tool",
+                      "prompt"
+                    ]
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "enabled_if_key": {
+                "default": false,
+                "description": "Disable this provider automatically when `api_key` is empty.",
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "mock",
+                "description": "Deterministic in-process mock (tests, demos, benchmarks)."
+              },
+              "enabled": {
+                "default": true,
+                "description": "Set false to disable the provider (and its models).",
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "max_concurrency": {
+                "default": 0,
+                "description": "Maximum concurrent upstream requests for this provider (0 = unlimited).",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "queue_timeout_ms": {
+                "default": 30000,
+                "description": "How long a request may wait for a concurrency slot before failing with `upstream_busy`.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "timeout_ms": {
+                "default": 120000,
+                "description": "Per-attempt upstream timeout.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "headers": {
+                "default": {},
+                "description": "Extra headers sent upstream.",
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "allow_header_faults": {
+                "default": false,
+                "description": "Honor `x-mock-*` request headers for fault injection (never enable in production).",
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "fixed_text": {
+                "default": "This is a fixed response from the Switchyard mock provider.",
+                "description": "Reply of the `mock-fixed` model.",
+                "type": "string"
+              },
+              "embedding_dim": {
+                "default": 256,
+                "description": "Dimension of `mock-embed` vectors.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 8192
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "extractive_threshold": {
+                "default": 0.2,
+                "description": "Minimum lexical overlap for mock-extractive to answer instead of NO_ANSWER.",
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "scripts": {
+                "default": {},
+                "description": "Scripted tool-call responses for `mock-tools`, keyed by script id.",
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {}
+                }
+              },
+              "faults": {
+                "description": "Faults applied to every request of this provider.",
+                "type": "object",
+                "properties": {
+                  "latency_ms": {
+                    "default": 0,
+                    "description": "Fixed added latency per request.",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      {
+                        "$ref": "#/$defs/interpolated"
+                      }
+                    ]
+                  },
+                  "fail_rate": {
+                    "default": 0,
+                    "description": "Probability (0..1) of failing with `status`.",
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      {
+                        "$ref": "#/$defs/interpolated"
+                      }
+                    ]
+                  },
+                  "status": {
+                    "description": "HTTP status used for injected failures (always fails when set and fail_rate is 0).",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 400,
+                        "maximum": 599
+                      },
+                      {
+                        "$ref": "#/$defs/interpolated"
+                      }
+                    ]
+                  },
+                  "retry_after_s": {
+                    "description": "`Retry-After` (seconds) sent with injected failures.",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      {
+                        "$ref": "#/$defs/interpolated"
+                      }
+                    ]
+                  },
+                  "stream_fail_after": {
+                    "description": "Fail a stream after emitting N content chunks.",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      {
+                        "$ref": "#/$defs/interpolated"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "custom",
+                "description": "Your own adapter, registered via `createGateway({ adapterFactories })`."
+              },
+              "enabled": {
+                "default": true,
+                "description": "Set false to disable the provider (and its models).",
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "max_concurrency": {
+                "default": 0,
+                "description": "Maximum concurrent upstream requests for this provider (0 = unlimited).",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "queue_timeout_ms": {
+                "default": 30000,
+                "description": "How long a request may wait for a concurrency slot before failing with `upstream_busy`.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "timeout_ms": {
+                "default": 120000,
+                "description": "Per-attempt upstream timeout.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "headers": {
+                "default": {},
+                "description": "Extra headers sent upstream.",
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "factory": {
+                "description": "Key in `createGateway({ adapterFactories })`; defaults to the provider name.",
+                "type": "string",
+                "minLength": 1
+              },
+              "base_url": {
+                "description": "Passed to the factory unchanged.",
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "api_key": {
+                "description": "Passed to the factory unchanged.",
+                "type": "string"
+              },
+              "options": {
+                "default": {},
+                "description": "Free-form settings handed to the factory unchanged.",
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "description": "Upstream connections, by name. Discriminated by `type`."
+    },
+    "models": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Name of an entry in `providers`."
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Upstream model id."
+          },
+          "kind": {
+            "default": "chat",
+            "description": "What the model serves; routes may only mix models of one kind.",
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "chat",
+                  "embedding",
+                  "rerank"
+                ]
+              },
+              {
+                "$ref": "#/$defs/interpolated"
+              }
+            ]
+          },
+          "base_url": {
+            "description": "Per-model base URL override (llama.cpp serves one model per port).",
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uri"
+              },
+              {
+                "$ref": "#/$defs/interpolated"
+              }
+            ]
+          },
+          "input_templates": {
+            "description": "Embedding templates selected by the request's `input_type`; `{text}` and `{title}` are replaced.",
+            "type": "object",
+            "properties": {
+              "query": {
+                "description": "Template for `input_type: query`.",
+                "type": "string"
+              },
+              "document": {
+                "description": "Template for `input_type: document`.",
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "pricing": {
+            "type": "object",
+            "properties": {
+              "input": {
+                "default": 0,
+                "description": "USD per 1M input tokens.",
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "output": {
+                "default": 0,
+                "description": "USD per 1M output tokens (reasoning tokens are billed as output).",
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "cached_input": {
+                "description": "USD per 1M cached input tokens (defaults to `input`).",
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "cache_write": {
+                "description": "USD per 1M cache-write tokens (defaults to `input`).",
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "per_request": {
+                "description": "Flat USD fee per request (e.g. rerank searches).",
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              }
+            },
+            "description": "Model pricing (USD per 1M tokens). Overrides the pricing_file entry.",
+            "additionalProperties": false
+          },
+          "timeout_ms": {
+            "description": "Per-attempt timeout override.",
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "$ref": "#/$defs/interpolated"
+              }
+            ]
+          },
+          "context_window": {
+            "description": "Context window, used for pre-flight estimates only.",
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0
+              },
+              {
+                "$ref": "#/$defs/interpolated"
+              }
+            ]
+          },
+          "params": {
+            "default": {},
+            "description": "Request body defaults merged under the client request (OpenAI-family upstreams).",
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          },
+          "options": {
+            "default": {},
+            "description": "Provider specific options (e.g. mock faults).",
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          },
+          "description": {
+            "description": "Free text (shown nowhere; for humans).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "model"
+        ],
+        "additionalProperties": false
+      },
+      "description": "Concrete upstream models (\"targets\"), by name."
+    },
+    "routes": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "description": "Shown in `GET /v1/models`.",
+            "type": "string"
+          },
+          "targets": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Model name (entry in `models`)."
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "model": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Model name (entry in `models`)."
+                    },
+                    "weight": {
+                      "default": 1,
+                      "description": "Share for `strategy: weighted`.",
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "exclusiveMinimum": 0
+                        },
+                        {
+                          "$ref": "#/$defs/interpolated"
+                        }
+                      ]
+                    },
+                    "timeout_ms": {
+                      "description": "Per-attempt timeout for this target.",
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        {
+                          "$ref": "#/$defs/interpolated"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "model"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "description": "Models this route dispatches to (in fallback order for `fallback`)."
+          },
+          "strategy": {
+            "default": "fallback",
+            "description": "How targets are ordered per request.",
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "fallback",
+                  "weighted",
+                  "least-latency"
+                ]
+              },
+              {
+                "$ref": "#/$defs/interpolated"
+              }
+            ]
+          },
+          "retry": {
+            "description": "Overrides the top-level `retry` for this route.",
+            "type": "object",
+            "properties": {
+              "attempts": {
+                "default": 2,
+                "description": "Total attempts per target (1 = no retry).",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 10
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "backoff_ms": {
+                "default": 250,
+                "description": "Base delay of exponential backoff with full jitter.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "max_backoff_ms": {
+                "default": 4000,
+                "description": "Cap of the backoff delay.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "max_retry_after_ms": {
+                "default": 20000,
+                "description": "Upper bound for honoring upstream Retry-After.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          "timeout_ms": {
+            "description": "Total deadline for the whole request across retries and fallbacks.",
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "$ref": "#/$defs/interpolated"
+              }
+            ]
+          },
+          "cache": {
+            "description": "Response caching (off unless configured).",
+            "type": "object",
+            "properties": {
+              "exact": {
+                "description": "Exact-match cache for deterministic requests (temperature unset/0, n ≤ 1).",
+                "type": "object",
+                "properties": {
+                  "ttl_s": {
+                    "description": "Entry lifetime in seconds.",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      {
+                        "$ref": "#/$defs/interpolated"
+                      }
+                    ]
+                  },
+                  "enabled": {
+                    "default": true,
+                    "description": "Set false to disable without removing the TTL.",
+                    "anyOf": [
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "$ref": "#/$defs/interpolated"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "ttl_s"
+                ],
+                "additionalProperties": false
+              },
+              "semantic": {
+                "description": "Semantic cache on Redis 8 vector sets (needs Redis; requests without tools only).",
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "default": false,
+                    "description": "Turn the semantic cache on for this route.",
+                    "anyOf": [
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "$ref": "#/$defs/interpolated"
+                      }
+                    ]
+                  },
+                  "embed_route": {
+                    "description": "Embedding route used to embed the prompt.",
+                    "type": "string"
+                  },
+                  "min_similarity": {
+                    "default": 0.95,
+                    "description": "Cosine similarity needed for a semantic hit.",
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      {
+                        "$ref": "#/$defs/interpolated"
+                      }
+                    ]
+                  },
+                  "ttl_s": {
+                    "description": "Entry lifetime (default: the exact TTL).",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      {
+                        "$ref": "#/$defs/interpolated"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              },
+              "shared": {
+                "default": false,
+                "description": "Share entries across teams (default: namespaced per team).",
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          "defaults": {
+            "description": "Request parameters applied when the client does not set them.",
+            "default": {},
+            "type": "object",
+            "properties": {
+              "reasoning_effort": {
+                "description": "Default `reasoning_effort` (null = none).",
+                "anyOf": [
+                  {
+                    "description": "Reasoning effort hint, mapped per provider (dropped where unsupported).",
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "minimal",
+                          "low",
+                          "medium",
+                          "high",
+                          "xhigh",
+                          "max",
+                          "none"
+                        ]
+                      },
+                      {
+                        "$ref": "#/$defs/interpolated"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "max_tokens": {
+                "description": "Default `max_tokens`; also bounds the pre-flight cost estimate.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              },
+              "temperature": {
+                "description": "Default `temperature`.",
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 2
+                  },
+                  {
+                    "$ref": "#/$defs/interpolated"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          "hidden": {
+            "default": false,
+            "description": "Hide from GET /v1/models (still callable).",
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "$ref": "#/$defs/interpolated"
+              }
+            ]
+          }
+        },
+        "required": [
+          "targets"
+        ],
+        "additionalProperties": false
+      },
+      "description": "Virtual models exposed to clients: the `model` field of every request."
+    },
+    "limits": {
+      "description": "Rate limits (need Redis).",
+      "type": "object",
+      "properties": {
+        "defaults": {
+          "description": "Limits for keys and teams that set none themselves.",
+          "type": "object",
+          "properties": {
+            "key": {
+              "description": "Default per-key limits (key records override).",
+              "type": "object",
+              "properties": {
+                "rpm": {
+                  "description": "Requests per minute.",
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "exclusiveMinimum": 0
+                    },
+                    {
+                      "$ref": "#/$defs/interpolated"
+                    }
+                  ]
+                },
+                "tpm": {
+                  "description": "Tokens per minute (prompt estimate + output).",
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "exclusiveMinimum": 0
+                    },
+                    {
+                      "$ref": "#/$defs/interpolated"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            "team": {
+              "description": "Default per-team limits (team records override).",
+              "type": "object",
+              "properties": {
+                "rpm": {
+                  "description": "Requests per minute.",
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "exclusiveMinimum": 0
+                    },
+                    {
+                      "$ref": "#/$defs/interpolated"
+                    }
+                  ]
+                },
+                "tpm": {
+                  "description": "Tokens per minute (prompt estimate + output).",
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "exclusiveMinimum": 0
+                    },
+                    {
+                      "$ref": "#/$defs/interpolated"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "window_s": {
+          "default": 60,
+          "description": "Sliding-window length; RPM/TPM are defined per window (keep at 60).",
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "budgets": {
+      "description": "Team budgets (need Redis + Postgres).",
+      "type": "object",
+      "properties": {
+        "enforcement": {
+          "default": "hard",
+          "description": "`hard` blocks with 402, `soft` only alerts, `off` disables budgets.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "hard",
+                "soft",
+                "off"
+              ]
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "soft_threshold": {
+          "default": 0.8,
+          "description": "Utilization that fires the soft alert (budgets may override).",
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "alert_webhook": {
+          "description": "URL that receives budget alerts as JSON (one attempt, deduplicated).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reconcile_interval_s": {
+          "default": 300,
+          "description": "How often the worker reconciles Redis spend counters from Postgres rollups.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "definitions_ttl_ms": {
+          "default": 30000,
+          "description": "TTL of the per-process cache of team budget definitions.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "usage": {
+      "description": "Usage pipeline (Redis stream → worker → Postgres).",
+      "type": "object",
+      "properties": {
+        "stream": {
+          "default": "sy:usage",
+          "description": "Redis stream that carries usage events.",
+          "type": "string"
+        },
+        "batch_size": {
+          "default": 500,
+          "description": "Max events per worker insert.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "flush_interval_ms": {
+          "default": 1000,
+          "description": "Worker poll / flush interval.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "retention_days": {
+          "default": 400,
+          "description": "Monthly usage partitions older than this are dropped.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "in_process_writer": {
+          "default": false,
+          "description": "Run the usage worker inside the gateway process (single-node setups).",
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "stream_maxlen": {
+          "default": 1000000,
+          "description": "Approximate MAXLEN for XADD.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "buffer_max": {
+          "default": 10000,
+          "description": "Events kept in memory while Redis is unavailable; older events are dropped beyond this.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "consumer_group": {
+          "default": "writers",
+          "description": "Redis consumer group of the workers.",
+          "type": "string"
+        },
+        "claim_idle_ms": {
+          "default": 60000,
+          "description": "Pending entries idle longer than this are reclaimed (XAUTOCLAIM) from dead consumers.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "partitions_ahead": {
+          "default": 2,
+          "description": "Monthly partitions created ahead of time.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 24
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "metrics": {
+      "description": "Prometheus metrics (see docs/METRICS.md).",
+      "default": {},
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Expose Prometheus metrics.",
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "port": {
+          "description": "Serve /metrics on a separate port (e.g. 9464) instead of the API port.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "path": {
+          "default": "/metrics",
+          "description": "Metrics endpoint path.",
+          "type": "string"
+        },
+        "default_metrics": {
+          "default": true,
+          "description": "Include prom-client's Node.js process metrics.",
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "observability": {
+      "description": "Logging.",
+      "default": {},
+      "type": "object",
+      "properties": {
+        "log_level": {
+          "default": "info",
+          "description": "pino log level.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "fatal",
+                "error",
+                "warn",
+                "info",
+                "debug",
+                "trace",
+                "silent"
+              ]
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "log_bodies": {
+          "default": false,
+          "description": "Reserved: prompt/response body logging is not implemented yet.",
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "metrics": {
+          "default": true,
+          "description": "Legacy switch; metrics are on only when this and `metrics.enabled` are true.",
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/$defs/interpolated"
+            }
+          ]
+        },
+        "otel": {
+          "description": "Reserved: OpenTelemetry tracing is not implemented yet.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "description": "Reserved.",
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "$ref": "#/$defs/interpolated"
+                }
+              ]
+            },
+            "endpoint": {
+              "description": "Reserved.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "providers",
+    "models",
+    "routes"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "interpolated": {
+      "description": "A value taken from the environment: `${VAR}`, `${VAR:-default}` or `${VAR-default}`.",
+      "type": "string",
+      "pattern": "\\$\\{[A-Za-z_][A-Za-z0-9_]*(:?-[^}]*)?\\}"
+    }
+  }
+}

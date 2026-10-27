@@ -1,6 +1,7 @@
-import { pino, type Logger, type LoggerOptions } from 'pino';
+import { pino, type Logger as PinoLogger, type LoggerOptions } from 'pino';
 
-export type { Logger } from 'pino';
+/** The pino logger used throughout the gateway (`createLogger`). */
+export type Logger = PinoLogger;
 
 export interface LoggerConfig {
   level?: string;

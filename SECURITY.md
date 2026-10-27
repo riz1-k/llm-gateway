@@ -56,7 +56,30 @@ The following are especially relevant:
 ## Hardening notes
 
 See [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md) for the threat model, the last review's
-findings and the accepted residual risks. In short, for production:
+findings and the accepted residual risks.
+
+### Known residual risks
+
+These are accepted and documented. Reports that only restate them are out of scope, but ideas
+for closing them are welcome:
+
+- **Budget overshoot under concurrency (SR-14):** budgets are a pre-flight check plus a
+  reconciliation after the response. Concurrent requests from one team can overshoot by at most
+  in-flight requests × cost per request. RPM/TPM and provider concurrency limits cap this.
+- **Fail-open on Redis outages (SR-15):** with the default `redis.fail_open: true`, rate limits
+  and budgets are skipped (and logged) while Redis is down. Key verification still fails closed.
+- **`/metrics` content (SR-16):** it exposes team slugs, route names and spend. Serve it on
+  `metrics.port`.
+- **No request timeout on long generations (SR-17):** run the gateway behind a proxy with
+  connection limits and timeouts.
+- **One full-rights admin token (SR-18):** there is no RBAC yet.
+- **Admin-configured webhooks (SR-20):** they can reach any URL the gateway can reach.
+- **Tool arguments are untrusted (SR-21):** the gateway validates emulated tool calls but never
+  executes them. Clients must treat the arguments as untrusted.
+
+### Production checklist
+
+In short, for production:
 
 - set a long random `SWITCHYARD_ADMIN_TOKEN`;
 - use database-issued keys;

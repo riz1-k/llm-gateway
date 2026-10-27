@@ -1,7 +1,7 @@
 # Switchyard status
 
-_Last updated: 2026-10-27, after the infra wave (K: image, compose, Helm, Terraform, dashboards,
-CI). The platform was built in wave H, the core in wave G._
+_Last updated: 2026-10-27, after the release wave (M: npm package, release engineering,
+benchmarks, docs). The infra was built in wave K, the platform in wave H and the core in wave G._
 
 ## What exists
 
@@ -36,7 +36,137 @@ Without them, it falls back to the in-memory core implementations.
 | Admin API     | SPEC §12 under `/admin`: teams CRUD, keys create/list/revoke/rotate, budgets, budget status, usage reports, cache purge, audit log, redacted config; every mutation audit-logged in the same transaction                                                                                         | `src/admin/`                            |
 | Metrics       | `PromMetrics` (all SPEC §13 names + extras), `/metrics` on the API port or `metrics.port`; worker metrics on `--port`                                                                                                                                                                            | `src/observability/metrics.ts`          |
 | Dev tooling   | `Makefile`, `scripts/dev.sh`, `scripts/smoke_openai_sdk.py`, `.env.example`                                                                                                                                                                                                                      | root                                    |
-| Docs          | `README.md`, `docs/ADMIN.md`, `docs/METRICS.md`, `docs/DEPLOYMENT.md`, `docs/OBSERVABILITY.md`, `docs/opencode-bridge.md`, this file                                                                                                                                                             |                                         |
+| Docs          | `README.md`, `docs/{CONFIG (generated),API,LIBRARY,ARCHITECTURE,RELEASING,ADMIN,METRICS,DEPLOYMENT,OBSERVABILITY}.md`, `docs/adr/` (6 ADRs), `docs/opencode-bridge.md`, `CONTRIBUTING.md`, `SECURITY.md`, this file                                                                              |                                         |
+| Release       | npm package `switchyard-gateway` (CLI `switchyard`, library, `./mock-provider`, `./config.schema.json`), Changesets + `release.yml` (npm trusted publishing, GitHub Packages, GitHub Release, GHCR), pack smoke, verdaccio e2e, k6 benchmarks                                                    | see [Release](#release-wave-m)          |
+
+## Release (wave M)
+
+Switchyard is packaged and release-engineered as an open-source product. **Nothing has been
+published yet:** the first release happens when the repository is pushed and the owner finishes
+the one-time setup in [RELEASING.md](RELEASING.md#one-time-setup-owner).
+
+### Package `switchyard-gateway@0.1.0`
+
+- **Entry points:** ESM-only, Node ≥ 22.12.
+  - `.`: the library, with a tiered public API of 133 exports. Every export has TSDoc, enforced
+    by `scripts/check-api-docs.mjs`. Internal helpers (Redis key builders, Lua wrappers,
+    invalidation bus, writer internals, …) are no longer exported.
+  - `./mock-provider`.
+  - `./config.schema.json`.
+  - `./package.json`.
+  - bin: `switchyard`.
+- **mock-provider decision:** `@switchyard/mock-provider` stays a private workspace package. It
+  is bundled into the CLI and re-exported as `switchyard-gateway/mock-provider`: one artifact,
+  no version skew.
+- **Tarball:** 16 files, 161.9 kB packed and 638.1 kB unpacked (dist JS and d.ts, drizzle SQL,
+  schema, README, CHANGELOG, LICENSE). Source maps are off.
+- **Checks:**
+  - `publint --strict`: "All good!".
+  - `attw --profile esm-only`: 🟢 node16-ESM and bundler for all four entry points.
+- **Config JSON Schema:**
+  - Generated from zod (`scripts/config-schema.ts`, draft 2020-12, input shape).
+  - Rejects typos (`additionalProperties: false`) and accepts `${VAR}` strings for numbers,
+    booleans and enums.
+  - Unit tests validate every `config/*.yaml`, the Helm `values.yaml` config and the `init`
+    starter, and check for drift.
+  - `docs/CONFIG.md` is generated from the same schema, with its own drift test.
+- **CLI UX:**
+  - `switchyard init` writes `gateway.yaml` with the mock provider and the schema comment, plus
+    `.env.example`, and never overwrites without `--force`.
+  - The config path is resolved from `--config`, then `$SWITCHYARD_CONFIG`, then
+    `./gateway.yaml`. `./.env`, `--env-file` and `SWITCHYARD_ENV_FILE` are loaded without
+    overriding the real environment.
+  - Per-command `--help`, and hints for unknown flags or commands, ECONNREFUSED/DNS/timeouts and
+    Postgres auth or missing-database errors.
+  - Config errors start with the file path.
+  - `serve` no longer hangs when Redis or Postgres is unreachable (startup is bounded by
+    `connect_timeout_ms`, with a hint), and shutdown with Redis down no longer hangs.
+- **Library:**
+  - `type: custom` providers with `createGateway({ adapterFactories })`.
+  - The default in-memory cache is now `MemoryCacheStore` (LRU), not a no-op.
+  - `LogUsageSink` logs at `debug`.
+- **Streamed cost:**
+  - `usage.cost` (USD), `usage.sy_cache` and, on hits, `usage.sy_saved_cost` appear in chat
+    bodies and in the final streamed usage chunk when `include_usage` is set, including streamed
+    cache replays.
+  - Backward compatible (additive fields), contract-tested with the official `openai` SDK, and
+    documented in [API.md](API.md#cost-in-the-response-body-usagecost).
+
+### Verdaccio proof (2026-10-27, final build)
+
+`scripts/verdaccio-e2e.sh`:
+
+1. Starts a throwaway verdaccio 7.0.2 on `127.0.0.1:48731`.
+2. Publishes with `pnpm publish` as a dummy user: `✅ Published package switchyard-gateway@0.1.0`,
+   files=16, unpacked=638080, and no `workspace:` ranges in the published manifest.
+3. Installs into an empty project (41 packages) and runs:
+   - `switchyard --version` → `0.1.0`;
+   - `init`;
+   - `validate-config` → "✔ gateway.yaml is valid: 1 providers, 2 models, 2 routes";
+   - `serve`, then curl chat (`usage.cost` 0.0000033, `sy_cache: miss`) and embeddings (2 × 256);
+   - the official `openai@7.45.0` SDK: chat (`cost` 0.00000555), streaming (final chunk
+     `cost` 0.0000048) and embeddings;
+   - the library: `createGateway` → 200 with cost 0.0000018, the `mock-provider` export and the
+     schema JSON import.
+4. Stops the registry and the server by PID and deletes everything.
+
+CI runs the same smoke against the packed tarball on Node 22 and 24 (`scripts/pack-smoke.sh`).
+
+### Release engineering
+
+- **Changesets** (`.changeset/`, GitHub changelog). The first release publishes **0.1.0 as-is**:
+  no changeset is pending, `changeset publish-plan` → "switchyard-gateway@0.1.0 (latest)", and
+  `CHANGELOG.md` has a hand-written 0.1.0 entry.
+- **`.github/workflows/release.yml`:**
+  - select-mode → version PR | pack → publish to npmjs.com with provenance, using npm trusted
+    publishing (OIDC, environment `npm`), with an `NPM_TOKEN` fallback for the first publish;
+  - then the git tag and GitHub Release;
+  - then `@riz1-k/switchyard-gateway` on GitHub Packages (`GITHUB_TOKEN`);
+  - then `docker.yml` through `workflow_call`, pushing `ghcr.io/riz1-k/switchyard:<version>`,
+    `<major>.<minor>` and `latest`.
+- **CI:** `ci.yml` gained a `package` job (Node 22/24 matrix: schema and docs drift, TSDoc,
+  publint, attw, pack smoke). K's security job (audit, gitleaks) is untouched.
+- **Hardening:** actions are SHA-pinned and permissions are least-privilege per job.
+  `actionlint` 1.7.12 reports 0 errors in 3 files. shellcheck is not installed here, so its
+  checks were skipped.
+- **Makefile:** `schema`, `check-package`, `pack-smoke`, `verdaccio-e2e`, `bench`. `test-live`
+  and `dev` read `ENV_FILE` (default `.env`) instead of `../devenv/.env`.
+
+### Benchmarks
+
+See [bench/RESULTS.md](../bench/RESULTS.md): k6 against a 0 ms mock on one pinned gateway core.
+
+| p50 overhead (200 req/s) | Platform off  | Platform on | Target |
+| ------------------------ | ------------- | ----------- | ------ |
+| Chat miss                | +2.26 ms      | +3.41 ms    | < 3 ms |
+| Exact-cache hit          | +0.48 ms      | +1.72 ms    | < 1 ms |
+| Max req/s miss / hit     | 1,243 / 3,630 | 651 / 2,017 |        |
+
+- **Targets:** met with the platform off, missed with it on.
+- **Profiling:** one `node --cpu-prof` session found log writes, upstream `fetch`, token
+  estimation, GC and ioredis as the top costs.
+- **Fixes:** three small fixes (usage log at debug, concurrent budget and rate-limit checks,
+  parallel post-response writes). An interleaved A/B showed no significant change on the miss
+  path. Documented as is.
+- **Caveat:** the numbers come from a shared, loaded laptop.
+
+### Docs
+
+- New: README (rewritten), `docs/CONFIG.md` (generated), `docs/API.md`, `docs/LIBRARY.md`,
+  `docs/ARCHITECTURE.md`, `docs/RELEASING.md`, and six ADRs in `docs/adr/` (Hono, opencode
+  emulation, Lua sliding-window limits, Redis Streams usage pipeline, semantic cache on vector
+  sets, budgets).
+- Contributor files: `CONTRIBUTING.md`, `SECURITY.md` (now lists the residual risks from
+  SECURITY_REVIEW), issue templates, PR template, `.changeset/README.md`, `.node-version`, and
+  `LICENSE` (MIT, riz1-k).
+
+### Hygiene
+
+- **Audit:** `pnpm audit --prod` → "No known vulnerabilities found". The full audit shows 1
+  moderate in the dev-only `drizzle-kit → esbuild` chain (SR-23).
+- **Secrets:** gitleaks over the working tree reports "no leaks found".
+- **Tests:** 341 gateway and 42 mock-provider tests pass. tsc, eslint and `prettier --check` are
+  clean.
 
 ## How to run
 
@@ -58,8 +188,9 @@ node packages/gateway/dist/cli.js seed-dev --config config/gateway.local.yaml --
 node packages/gateway/dist/cli.js usage --config config/gateway.local.yaml --group-by team
 ```
 
-`scripts/dev.sh` sources `../devenv/.env` (for `OPENCODE_SERVER_PASSWORD`) and an optional local
-`.env`. It runs `dist/cli.js` and falls back to the TypeScript source via `tsx` when there is no
+`scripts/dev.sh` loads `$SWITCHYARD_ENV_FILE` (default: `./.env`, gitignored; for
+`OPENCODE_SERVER_PASSWORD`). On this machine point it at the devenv file:
+`make dev ENV_FILE=../devenv/.env` (the same variable works for `make test-live`). It runs `dist/cli.js` and falls back to the TypeScript source via `tsx` when there is no
 build or when `SWITCHYARD_DEV_SOURCE=1` is set.
 
 - **Base URL:** `http://localhost:8787/v1`
@@ -307,9 +438,15 @@ heavy-docker lock and torn down afterwards.
 
 ## Known gaps
 
-- **No OpenTelemetry tracing** (SPEC §13 spans). Metrics and logs are done.
+- **No OpenTelemetry tracing** (SPEC §13 spans). Metrics and logs are done. `observability.otel`
+  and `log_bodies` are accepted but documented as reserved.
+- **Platform-on overhead is above the SPEC targets:** about 3.2–3.4 ms p50 on a miss and
+  1.1–1.7 ms on a hit, against targets of 3 ms and 1 ms (bench/RESULTS.md). The cause is three
+  sequential Redis round trips per request. The next steps (one combined limit-and-budget Lua
+  call, non-blocking post-response writes) change semantics and were left for a later release.
+- **Not published yet:** npm, GitHub Packages and GHCR wait for the owner's one-time setup
+  (RELEASING.md). Bun and Deno are untested.
 - **Infra gaps (wave K):** see [Infrastructure → known gaps](#infra-known-gaps).
-- **No changesets and no package-level README** for npm publishing.
 - **Redis Cluster is not supported:** the Lua scripts touch multiple keys without hash tags. Use a
   single primary, with replicas or Sentinel.
 - **`sy_budget_utilization_ratio` only updates on traffic** (admission of a team's request). For
@@ -338,8 +475,11 @@ heavy-docker lock and torn down afterwards.
 3. **The response `model` field** is the route name the client asked for. The upstream model is in
    `x-sy-model`.
 4. **`x-sy-cost-usd` is absent on streaming responses**, because headers are sent before usage is
-   known. Cost is still logged and emitted in the usage event at stream end. The exception is
-   streaming cache hits, which do send it (`0`).
+   known. **Resolved in wave M:** the final streamed usage chunk (with
+   `stream_options.include_usage`) carries `usage.cost`, `usage.sy_cache` and, on hits,
+   `usage.sy_saved_cost`. Non-streamed bodies carry the same fields (see
+   [API.md](API.md#cost-in-the-response-body-usagecost)). Streaming cache hits still also send
+   the header (`0`).
 5. **Extra error codes:** `unsupported_content` (400), `upstream_invalid_output` (502),
    `request_aborted` (499, client disconnect, logged only), `not_found` (404 for unknown paths)
    and `internal_error` (500).
@@ -358,8 +498,10 @@ heavy-docker lock and torn down afterwards.
 11. **Synthetic streaming** (await the full reply, then emit ~48-char chunks) is used on opencode
     for JSON mode and `stop` sequences, since output must be validated or truncated before
     sending. Plain chat and tool streaming use the real `/event` deltas.
-12. **Without Redis, the `UsageSink` is `LogUsageSink`**, which writes one "request completed"
-    log line per request. With Redis it is the stream sink.
+12. **Without Redis, the `UsageSink` is `LogUsageSink`.** Since wave M it logs the full event at
+    `debug` only. The `info` "request completed" line already carries the same fields, and the
+    second line per request roughly doubled the logging cost (see bench/RESULTS.md). With Redis
+    it is the stream sink.
 13. **TypeScript 6.0.3** is used instead of 7.x, because typescript-eslint 8.72 requires
     TypeScript < 6.1.
 14. **`createGateway()` returns a `Gateway` object** (`{ app, fetch, reload, setDraining, close,
@@ -474,13 +616,15 @@ Done; see [Infrastructure (wave K)](#infrastructure-wave-k). The original notes 
   opencode on :4096 and llama.cpp on :8081–8083. Pass `OPENCODE_SERVER_PASSWORD` and
   `SWITCHYARD_ADMIN_TOKEN` as secrets.
 
-### Wave M (npm publish)
+### Wave M (npm publish): done
 
-- **Package:** `switchyard-gateway` with bin `switchyard` and exports `.` and `./mock-provider`.
-  The mock provider is bundled in through `deps.alwaysBundle`, so the workspace package does not
-  need to be published.
-- **Build:** `dist/*.js` + `.d.ts` are produced with tsdown using `tsconfig.build.json` (src
-  only, because generating dts with tests included runs out of memory). `npm pack --dry-run` was
-  verified (12 files, 202 kB).
-- **Missing:** changesets, a package-level README, `repository`/`homepage` metadata, and a
-  provenance/CI publish workflow.
+See [Release (wave M)](#release-wave-m). Follow-ups for later waves:
+
+- **Owner, one time:** the npm token, then the trusted-publishing switch
+  ([RELEASING.md](RELEASING.md#one-time-setup-owner)). Until the repository is pushed and that
+  is done, nothing is published.
+- **Brief O** can rely on `usage.cost` / `usage.sy_cache` / `usage.sy_saved_cost` in chat bodies
+  and in the final streamed chunk (additive and backward compatible; contract-tested with the
+  `openai` SDK).
+- **Benchmarks** are sensitive to background load on this shared laptop; re-run `make bench` on
+  a quiet machine before quoting numbers outside this repo.

@@ -12,6 +12,7 @@ import { dropExpiredPartitions, ensurePartitions, monthsOf, writeUsageBatch } fr
 
 type StreamEntry = [id: string, fields: string[]];
 
+/** Options for `UsageWorker`. */
 export interface UsageWorkerOptions {
   /** Dedicated connection: XREADGROUP BLOCK holds it. */
   redis: Redis;
@@ -40,6 +41,7 @@ export interface UsageWorkerOptions {
   onError?: () => void;
 }
 
+/** Counters reported by `UsageWorker.runOnce()`. */
 export interface WorkerStats {
   batches: number;
   read: number;

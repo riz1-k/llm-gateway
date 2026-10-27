@@ -50,6 +50,10 @@ export interface ErrorEnvelope {
   error: { message: string; type: string; code: string; param: string | null };
 }
 
+/**
+ * An error returned to the client in the OpenAI error envelope (`{ error: { message, type, code }
+ * }`) with an HTTP status.
+ */
 export class GatewayError extends Error {
   readonly status: number;
   readonly code: GatewayErrorCode;
@@ -125,6 +129,10 @@ export interface ProviderErrorInit {
   cause?: unknown;
 }
 
+/**
+ * An upstream failure thrown by adapters; `retryable` decides retry/fallback, `retryAfterMs` honors
+ * `Retry-After`.
+ */
 export class ProviderError extends Error {
   readonly status: number;
   readonly code: ProviderErrorCode;

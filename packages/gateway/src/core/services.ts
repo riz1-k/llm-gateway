@@ -15,6 +15,7 @@ import type { ChatResponse, EmbeddingResponse, OperationKind, RerankResponse } f
 // Auth
 // ---------------------------------------------------------------------------------------------
 
+/** The team (tenant) a key belongs to: unit of budgets, team limits and cost attribution. */
 export interface Team {
   /** DB uuid, or `team:<slug>` for static keys whose team has no DB row. */
   id: string;
@@ -26,6 +27,7 @@ export interface Team {
   tpmLimit?: number | undefined;
 }
 
+/** An authenticated API key (static or database-issued) with its team, scope and limits. */
 export interface ApiKeyRecord {
   id: string;
   name: string;
@@ -40,6 +42,7 @@ export interface ApiKeyRecord {
   source: 'static' | 'db';
 }
 
+/** Resolves a presented API key to its record (or `null` when unknown/revoked). */
 export interface KeyStore {
   /** Returns the key record for a presented bearer token, or null if unknown/revoked/expired. */
   verify(token: string): Promise<ApiKeyRecord | null>;
@@ -50,6 +53,7 @@ export interface KeyStore {
 // Rate limiting
 // ---------------------------------------------------------------------------------------------
 
+/** What the rate limiter needs for one request: the key, its team and the token estimate. */
 export interface RateLimitInput {
   key: ApiKeyRecord;
   route: string;
@@ -57,6 +61,7 @@ export interface RateLimitInput {
   estimatedTokens: number;
 }
 
+/** Result of a rate-limit check, including the `x-ratelimit-*` headers to return. */
 export interface RateLimitDecision {
   allowed: boolean;
   /** `x-ratelimit-*` headers for the tightest scope. */
@@ -68,6 +73,9 @@ export interface RateLimitDecision {
   reservation?: unknown;
 }
 
+/**
+ * RPM/TPM enforcement per key and team. Reserves the token estimate, then reconciles actual usage.
+ */
 export interface RateLimiter {
   check(input: RateLimitInput): Promise<RateLimitDecision>;
   /** Adjust TPM reservations by (actual − estimate) after completion. */
@@ -78,6 +86,7 @@ export interface RateLimiter {
 // Budgets
 // ---------------------------------------------------------------------------------------------
 
+/** Result of a pre-flight budget check: admitted or rejected with a 402 `budget_exceeded` error. */
 export interface BudgetDecision {
   allowed: boolean;
   /** Remaining USD in the tightest period, if known. */
@@ -86,6 +95,7 @@ export interface BudgetDecision {
   limitUsd?: number;
 }
 
+/** Per-team USD budget enforcement: pre-flight check before dispatch, spend recording after. */
 export interface BudgetGuard {
   check(input: { team: Team; route: string; preflightCostUsd: number }): Promise<BudgetDecision>;
   record(input: { team: Team; route: string; costUsd: number }): Promise<void>;
@@ -95,11 +105,13 @@ export interface BudgetGuard {
 // Cache
 // ---------------------------------------------------------------------------------------------
 
+/** The cached body: a chat completion, an embedding vector or a rerank response. */
 export type CachedPayload =
   | { kind: 'chat'; response: ChatResponse }
   | { kind: 'embedding'; response: EmbeddingResponse }
   | { kind: 'rerank'; response: RerankResponse };
 
+/** A cached response plus the metadata needed to report the hit (provider, model, saved cost). */
 export interface CacheEntry {
   payload: CachedPayload;
   provider: string;
@@ -109,6 +121,10 @@ export interface CacheEntry {
   createdAt: number;
 }
 
+/**
+ * Response cache backend (exact-match keys). `MemoryCacheStore` for one process, Redis via
+ * `createPlatform`.
+ */
 export interface CacheStore {
   get(key: string): Promise<CacheEntry | null>;
   set(key: string, entry: CacheEntry, ttlSeconds: number): Promise<void>;
@@ -122,6 +138,7 @@ export interface CacheStore {
 // Usage events
 // ---------------------------------------------------------------------------------------------
 
+/** One accounted request (tokens, cost, cache, latency, attempts) emitted to the `UsageSink`. */
 export interface UsageEvent {
   ts: string;
   request_id: string;
@@ -150,6 +167,7 @@ export interface UsageEvent {
   tags: string[];
 }
 
+/** Destination for usage events (log, memory, Redis stream → Postgres worker). Must never throw. */
 export interface UsageSink {
   /** Must not throw or block the request path. */
   emit(event: UsageEvent): void;
@@ -157,6 +175,10 @@ export interface UsageSink {
   close?(): Promise<void>;
 }
 
+/**
+ * Pluggable subsystems of the request pipeline. Override any of them via `createGateway({ services
+ * })`.
+ */
 export interface GatewayServices {
   keys: KeyStore;
   rateLimiter: RateLimiter;

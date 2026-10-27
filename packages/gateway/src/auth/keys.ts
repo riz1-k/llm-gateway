@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { ApiKeyRecord, KeyStore } from '../core/services.js';
 import type { GatewayConfig } from '../config/schema.js';
 
+/** SHA-256 hex digest of an API key (only hashes are stored). */
 export const hashKey = (key: string): string => createHash('sha256').update(key).digest('hex');
 
 export const keyPrefix = (key: string): string => key.slice(0, 12);

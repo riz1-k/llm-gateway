@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net';
 import OpenAI from 'openai';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createGateway, type Gateway } from '../../src/app.js';
+import { MemoryCacheStore } from '../../src/cache/store.js';
 import { silentLogger } from '../../src/observability/logger.js';
 import { KEY, testConfig } from '../helpers.js';
 
@@ -14,6 +15,7 @@ let client: OpenAI;
 beforeAll(async () => {
   gateway = createGateway({
     logger: silentLogger(),
+    services: { cache: new MemoryCacheStore() },
     config: testConfig({
       providers: { mock: { type: 'mock', allow_header_faults: true, embedding_dim: 32 } },
       models: {
@@ -21,11 +23,17 @@ beforeAll(async () => {
         down: { provider: 'mock', model: 'mock-echo', options: { fault: { status: 503 } } },
         tools: { provider: 'mock', model: 'mock-tools' },
         emb: { provider: 'mock', model: 'mock-embed', kind: 'embedding' },
+        priced: {
+          provider: 'mock',
+          model: 'mock-echo',
+          pricing: { input: 2_000_000, output: 10_000_000 }, // $2 / $10 per token: easy to assert
+        },
       },
       routes: {
         chat: { targets: ['down', 'echo'] },
         agent: { targets: ['tools'] },
         embed: { targets: ['emb'] },
+        cached: { targets: ['priced'], cache: { exact: { ttl_s: 60 } }, hidden: true },
       },
     }),
   });
@@ -129,5 +137,64 @@ describe('openai SDK contract', () => {
       .list()
       .catch((e: unknown) => e);
     expect(auth).toBeInstanceOf(OpenAI.AuthenticationError);
+  });
+
+  /** Switchyard extension fields on `usage` (not in the SDK types, reachable as extra fields). */
+  type CostUsage = OpenAI.CompletionUsage & {
+    cost?: number;
+    sy_cache?: string;
+    sy_saved_cost?: number;
+  };
+
+  async function streamUsage(content: string): Promise<CostUsage | undefined> {
+    const stream = await client.chat.completions.create({
+      model: 'cached',
+      stream: true,
+      stream_options: { include_usage: true },
+      messages: [{ role: 'user', content }],
+    });
+    let usage: CostUsage | undefined;
+    for await (const chunk of stream) if (chunk.usage) usage = chunk.usage;
+    return usage;
+  }
+
+  it('streamed usage carries usage.cost; cache replays report cost 0 and the saving', async () => {
+    const miss = await streamUsage('price this streamed answer');
+    expect(miss).toBeDefined();
+    const expected = miss!.prompt_tokens * 2 + miss!.completion_tokens * 10;
+    expect(miss!.cost).toBeCloseTo(expected, 6);
+    expect(miss!.sy_cache).toBe('miss');
+    expect(miss!.sy_saved_cost).toBeUndefined();
+
+    const hit = await streamUsage('price this streamed answer');
+    expect(hit!.cost).toBe(0);
+    expect(hit!.sy_cache).toBe('hit');
+    expect(hit!.sy_saved_cost).toBeCloseTo(expected, 6);
+  });
+
+  it('non-streamed usage.cost equals the x-sy-cost-usd header', async () => {
+    const { data, response } = await client.chat.completions
+      .create({ model: 'cached', messages: [{ role: 'user', content: 'price this json answer' }] })
+      .withResponse();
+    const usage = data.usage as CostUsage;
+    expect(usage.cost).toBe(Number(response.headers.get('x-sy-cost-usd')));
+    expect(usage.cost).toBeGreaterThan(0);
+    expect(usage.sy_cache).toBe('miss');
+
+    const again = await client.chat.completions
+      .create({ model: 'cached', messages: [{ role: 'user', content: 'price this json answer' }] })
+      .withResponse();
+    expect(again.response.headers.get('x-sy-cache')).toBe('hit');
+    expect((again.data.usage as CostUsage).cost).toBe(0);
+    expect((again.data.usage as CostUsage).sy_saved_cost).toBe(usage.cost);
+  });
+
+  it('streams without include_usage carry no usage at all', async () => {
+    const stream = await client.chat.completions.create({
+      model: 'cached',
+      stream: true,
+      messages: [{ role: 'user', content: 'no usage please' }],
+    });
+    for await (const chunk of stream) expect(chunk.usage ?? undefined).toBeUndefined();
   });
 });

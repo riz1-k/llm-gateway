@@ -1,6 +1,6 @@
 import type { CacheEntry, CacheStore } from '../core/services.js';
 
-/** Default cache: never hits. Wave H adds the Redis exact + semantic caches. */
+/** Cache that never hits: pass it as `services.cache` to disable caching entirely. */
 export class NoopCacheStore implements CacheStore {
   async get(_key: string): Promise<CacheEntry | null> {
     return null;
@@ -9,8 +9,8 @@ export class NoopCacheStore implements CacheStore {
 }
 
 /**
- * Bounded in-memory LRU cache with TTL. Useful for single-process dev setups and tests of the
- * pipeline's cache wiring; not shared across replicas.
+ * Bounded in-memory LRU cache with TTL: the default without Redis. Per process, so not shared
+ * across replicas (use the Redis cache from `createPlatform` for that).
  */
 export class MemoryCacheStore implements CacheStore {
   private readonly map = new Map<string, { entry: CacheEntry; expiresAt: number }>();

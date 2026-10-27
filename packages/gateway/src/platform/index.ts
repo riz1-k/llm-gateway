@@ -18,6 +18,7 @@ import { UsageWorker } from '../usage/worker.js';
 import { InvalidationBus } from './invalidation.js';
 import { createRedisClient, pingRedis, quitQuietly, RedisKeys } from './redis.js';
 
+/** Result of one readiness probe (Redis, Postgres, …) shown by `/readyz`. */
 export interface ReadinessCheck {
   ok: boolean;
   detail?: string;
@@ -45,6 +46,7 @@ export interface Platform {
   close(): Promise<void>;
 }
 
+/** Options for `createPlatform`. */
 export interface PlatformOptions {
   logger: Logger;
   /** Pass a registry to share it (tests), `false` to disable metrics. Default: from config. */
@@ -59,6 +61,10 @@ export interface PlatformOptions {
   role?: 'gateway' | 'admin';
 }
 
+/**
+ * Builds the Redis/Postgres platform layer (keys, limits, budgets, caches, breakers, usage stream,
+ * metrics, admin) from config. `startServer` calls it for you.
+ */
 export function createPlatform(config: ResolvedConfig, opts: PlatformOptions): Platform {
   let current = config;
   const cfg = (): ResolvedConfig => current;

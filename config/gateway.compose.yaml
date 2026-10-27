@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../packages/gateway/config.schema.json
 # ─────────────────────────────────────────────────────────────────────────────────────────────
 # Switchyard — containerised demo config (docker compose + the local kind cluster).
 #

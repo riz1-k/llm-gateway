@@ -1,0 +1,34 @@
+# yaml-language-server: $schema=../../packages/gateway/config.schema.json
+# Benchmark config, platform OFF: static key, in-memory exact cache, no Redis/Postgres.
+# The upstream is a standalone mock provider (0 ms latency) reached over HTTP, exactly like the
+# direct baseline, so "gateway − direct" isolates the gateway's own cost.
+server:
+  port: ${PORT:-18788}
+  host: 127.0.0.1
+auth:
+  static_keys:
+    - { key: sk-sy-bench-static, team: bench, name: bench }
+providers:
+  upstream:
+    type: openai-compatible
+    base_url: ${MOCK_URL:-http://127.0.0.1:18790/v1}
+    supports_stream_usage: true
+models:
+  echo:
+    provider: upstream
+    model: mock-echo
+    pricing: { input: 2.5, output: 10 }
+  embedder:
+    provider: upstream
+    model: mock-embed
+    kind: embedding
+    pricing: { input: 0.02 }
+routes:
+  chat:
+    targets: [echo]
+    cache: { exact: { ttl_s: 300 } }
+  embed:
+    targets: [embedder]
+    cache: { exact: { ttl_s: 300 } }
+metrics: { enabled: true, path: /metrics }
+observability: { log_level: '${LOG_LEVEL:-info}' }

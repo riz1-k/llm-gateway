@@ -6,17 +6,22 @@ import { interpolate, InterpolationError } from './interpolate.js';
 import { configSchema, pricingSchema, type GatewayConfig, type Pricing } from './schema.js';
 import { resolveConfig, type ResolvedConfig } from './resolve.js';
 
+/** Invalid or unreadable configuration. `details` lists one `path: message` entry per problem. */
 export class ConfigError extends Error {
   readonly details: string[];
+  /** The first line of the message, without the details. */
+  readonly summary: string;
   constructor(message: string, details: string[] = []) {
     super(
       details.length > 0 ? `${message}\n${details.map((d) => `  - ${d}`).join('\n')}` : message,
     );
     this.name = 'ConfigError';
     this.details = details;
+    this.summary = message;
   }
 }
 
+/** Options for `loadConfig` / `parseConfig` / `parseConfigText`. */
 export interface LoadOptions {
   env?: Record<string, string | undefined>;
   /** Base directory for relative paths (pricing_file); defaults to the config file's directory. */
@@ -66,6 +71,7 @@ export function parseConfig(raw: unknown, opts: LoadOptions = {}): ResolvedConfi
   return resolved;
 }
 
+/** Parses YAML text, then interpolates, validates and resolves it like `loadConfig`. */
 export function parseConfigText(text: string, opts: LoadOptions = {}): ResolvedConfig {
   let raw: unknown;
   try {
@@ -84,10 +90,14 @@ export function loadConfig(path: string, opts: LoadOptions = {}): ResolvedConfig
   } catch (err) {
     throw new ConfigError(`Cannot read config file ${path}: ${(err as Error).message}`);
   }
-  const resolved = parseConfigText(text, {
-    ...opts,
-    baseDir: opts.baseDir ?? dirname(resolve(path)),
-  });
+  let resolved: ResolvedConfig;
+  try {
+    resolved = parseConfigText(text, { ...opts, baseDir: opts.baseDir ?? dirname(resolve(path)) });
+  } catch (err) {
+    // Name the file: with several configs around, "Invalid configuration" alone is not actionable.
+    if (err instanceof ConfigError) throw new ConfigError(`${path}: ${err.summary}`, err.details);
+    throw err;
+  }
   resolved.sourcePath = resolve(path);
   return resolved;
 }

@@ -1,19 +1,38 @@
 {
   "name": "switchyard-gateway",
   "version": "0.1.0",
-  "description": "Switchyard: OpenAI-compatible LLM gateway with routing, fallback, circuit breaking, and provider emulation (tool calling / JSON mode) for non-OpenAI backends.",
-  "license": "MIT",
-  "type": "module",
+  "description": "OpenAI-compatible LLM gateway: routing, fallback, circuit breaking, exact + semantic caching, rate limits, budgets and per-team cost tracking. Library (Hono) + CLI.",
   "keywords": [
     "llm",
-    "gateway",
+    "llm-gateway",
+    "ai-gateway",
     "openai",
+    "openai-compatible",
     "anthropic",
     "proxy",
+    "router",
     "fallback",
     "circuit-breaker",
-    "hono"
+    "rate-limit",
+    "budget",
+    "cost-tracking",
+    "semantic-cache",
+    "hono",
+    "prometheus"
   ],
+  "homepage": "https://github.com/riz1-k/llm-gateway#readme",
+  "bugs": {
+    "url": "https://github.com/riz1-k/llm-gateway/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/riz1-k/llm-gateway.git",
+    "directory": "packages/gateway"
+  },
+  "license": "MIT",
+  "author": "riz1-k",
+  "type": "module",
+  "sideEffects": false,
   "engines": {
     "node": ">=22.12"
   },
@@ -25,19 +44,27 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "default": "./dist/index.js"
     },
     "./mock-provider": {
       "types": "./dist/mock-provider.d.ts",
-      "import": "./dist/mock-provider.js"
+      "default": "./dist/mock-provider.js"
     },
+    "./config.schema.json": "./config.schema.json",
     "./package.json": "./package.json"
   },
   "files": [
-    "dist",
-    "drizzle",
-    "README.md"
+    "dist/*.js",
+    "dist/*.d.ts",
+    "drizzle/*.sql",
+    "drizzle/meta/_journal.json",
+    "config.schema.json",
+    "CHANGELOG.md"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "build": "tsdown",
     "dev": "tsx src/cli.ts serve --config ../../config/gateway.local.yaml",
@@ -45,7 +72,11 @@
     "test:watch": "vitest",
     "test:live": "SWITCHYARD_LIVE=1 vitest run --config vitest.live.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "schema": "tsx scripts/config-schema.ts && tsx scripts/config-docs.ts",
+    "schema:check": "tsx scripts/config-schema.ts --check && tsx scripts/config-docs.ts --check",
+    "check:api-docs": "node scripts/check-api-docs.mjs",
+    "check:package": "publint --strict && attw --pack . --profile esm-only"
   },
   "dependencies": {
     "@hono/node-server": "2.1.5",

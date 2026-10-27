@@ -37,9 +37,14 @@ docker run --rm switchyard:dev validate-config /etc/switchyard/gateway.yaml   # 
 | Ports                       | 8787 API, 9464 gateway metrics, 9465 worker metrics/health, 8790 mock provider                   |
 | Filesystem                  | Works with a read-only root filesystem. It only needs a writable `/tmp` for `seed-dev --output`. |
 
-Images for `main` and `v*.*.*` tags are published to `ghcr.io/riz1-k/switchyard` for
-linux/amd64 and linux/arm64, with SBOM and provenance attestations
-(`.github/workflows/docker.yml`).
+Images are published to `ghcr.io/riz1-k/switchyard` for linux/amd64 and linux/arm64, with SBOM
+and provenance attestations (`.github/workflows/docker.yml`):
+
+- **Every release:** `<version>`, `<major>.<minor>` and `latest`. The release workflow calls the
+  Docker workflow after the npm publish (see [RELEASING.md](RELEASING.md)).
+- **`main`:** `edge` and `sha-<short>`.
+
+Pin a version tag, or a digest, in production.
 
 ## Configuration and secrets
 

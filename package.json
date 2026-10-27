@@ -1,7 +1,7 @@
 {
   "name": "switchyard",
   "private": true,
-  "description": "Switchyard — an OpenAI-compatible LLM gateway (monorepo root)",
+  "description": "Switchyard \u2014 an OpenAI-compatible LLM gateway (monorepo root)",
   "type": "module",
   "packageManager": "pnpm@11.24.0",
   "engines": {
@@ -15,15 +15,22 @@
     "format": "prettier --write .",
     "typecheck": "pnpm -r run typecheck",
     "dev": "bash scripts/dev.sh",
-    "mock": "pnpm --filter switchyard-gateway exec tsx src/cli.ts mock-provider --port 8790"
+    "mock": "pnpm --filter switchyard-gateway exec tsx src/cli.ts mock-provider --port 8790",
+    "changeset": "changeset",
+    "version-packages": "changeset version && pnpm --filter switchyard-gateway run schema && pnpm install --lockfile-only",
+    "check:package": "pnpm --filter switchyard-gateway run schema:check && pnpm --filter switchyard-gateway run check:api-docs && pnpm --filter switchyard-gateway run check:package"
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.5",
+    "@changesets/changelog-github": "1.0.1",
+    "@changesets/cli": "3.0.3",
     "@eslint/js": "10.0.1",
     "@types/node": "26.6.5",
     "eslint": "10.13.0",
     "eslint-config-prettier": "10.1.8",
     "globals": "17.13.0",
     "prettier": "3.9.10",
+    "publint": "0.3.25",
     "tsx": "4.23.15",
     "typescript": "6.0.3",
     "typescript-eslint": "8.72.1",

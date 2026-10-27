@@ -16,6 +16,7 @@ export interface ChunkMeta {
   model: string;
 }
 
+/** Builds one streamed chat chunk (for adapter authors). */
 export function makeChunk(
   meta: ChunkMeta,
   delta: ChatChunkDelta,
@@ -30,6 +31,7 @@ export function makeChunk(
   };
 }
 
+/** Builds the final usage-only chunk (`choices: []`) of a stream. */
 export function usageChunk(meta: ChunkMeta, usage: Usage): ChatChunk {
   return {
     id: meta.id,
@@ -178,6 +180,7 @@ export function isMeaningfulChunk(chunk: ChatChunk): boolean {
   });
 }
 
+/** Builds a `Usage` object from token counts. */
 export function makeUsage(
   prompt: number,
   completion: number,

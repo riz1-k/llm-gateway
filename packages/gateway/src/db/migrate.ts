@@ -20,6 +20,7 @@ export function migrationsFolder(): string {
   throw new Error('drizzle migrations folder not found (set SWITCHYARD_MIGRATIONS_DIR)');
 }
 
+/** Outcome of `runMigrations` (applied vs total migrations). */
 export interface MigrationResult {
   applied: number;
   total: number;

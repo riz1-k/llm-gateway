@@ -4,6 +4,7 @@ import * as schema from './schema.js';
 
 export type Db = PostgresJsDatabase<typeof schema>;
 
+/** Postgres connection (drizzle + postgres.js) used by the platform layer. */
 export interface Database {
   /** Raw postgres.js client (hot-path SQL, DDL). */
   readonly sql: postgres.Sql;
@@ -15,6 +16,7 @@ export interface Database {
   close(): Promise<void>;
 }
 
+/** Pool and schema options for `createDatabase`. */
 export interface DatabaseOptions {
   max?: number;
   /**
@@ -28,6 +30,7 @@ export interface DatabaseOptions {
 
 const SAFE_IDENT = /^[a-z_][a-z0-9_]{0,62}$/;
 
+/** Opens a Postgres connection pool for the platform layer. */
 export function createDatabase(url: string, opts: DatabaseOptions = {}): Database {
   const schemaName = opts.schema ?? 'public';
   if (!SAFE_IDENT.test(schemaName)) throw new Error(`invalid schema name: ${schemaName}`);

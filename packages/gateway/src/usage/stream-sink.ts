@@ -33,6 +33,7 @@ export class RedisStreamUsageSink implements UsageSink {
   private retryTimer: NodeJS.Timeout | undefined;
   private backoffMs = 0;
   private closed = false;
+  private closing: Promise<void> | undefined;
   private dropped = 0;
 
   constructor(private readonly opts: StreamSinkOptions) {
@@ -155,7 +156,13 @@ export class RedisStreamUsageSink implements UsageSink {
     }
   }
 
-  async close(): Promise<void> {
+  /** Idempotent: the gateway and the platform both close the sink on shutdown. */
+  close(): Promise<void> {
+    this.closing ??= this.doClose();
+    return this.closing;
+  }
+
+  private async doClose(): Promise<void> {
     await this.flush();
     this.closed = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);

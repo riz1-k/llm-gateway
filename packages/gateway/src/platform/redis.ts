@@ -79,10 +79,26 @@ export async function deleteByPattern(client: Redis, pattern: string): Promise<n
   return deleted;
 }
 
-export const quitQuietly = async (client: Redis): Promise<void> => {
+/**
+ * Closes a client gracefully when connected, otherwise immediately: `QUIT` on a disconnected
+ * client would sit in the offline queue forever and hang shutdown while Redis is down.
+ */
+export const quitQuietly = async (client: Redis, timeoutMs = 2_000): Promise<void> => {
+  if (client.status !== 'ready') {
+    client.disconnect();
+    return;
+  }
+  let timer: NodeJS.Timeout | undefined;
   try {
-    await client.quit();
+    await Promise.race([
+      client.quit(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('quit timed out')), timeoutMs);
+      }),
+    ]);
   } catch {
     client.disconnect();
+  } finally {
+    clearTimeout(timer);
   }
 };

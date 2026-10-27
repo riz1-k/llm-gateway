@@ -40,6 +40,9 @@ export default tseslint.config(
       'no-console': 'off',
     },
   },
+  { files: ['**/scripts/**', 'bench/**'], rules: { 'no-console': 'off' } },
+  // k6 scripts run in k6's JS runtime, which injects __ENV
+  { files: ['bench/k6/**'], languageOptions: { globals: { __ENV: 'readonly' } } },
   { files: ['**/*.js', '**/*.mjs'], ...tseslint.configs.disableTypeChecked },
   prettier,
 );

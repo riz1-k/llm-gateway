@@ -32,6 +32,7 @@ export interface GatewayMetrics {
   platformError(component: string): void;
 }
 
+/** Metrics implementation that records nothing. */
 export const noopMetrics: GatewayMetrics = {
   request: () => undefined,
   cacheLookup: () => undefined,
@@ -66,6 +67,7 @@ export interface PromMetricsOptions {
   prefix?: string;
 }
 
+/** Prometheus implementation of `GatewayMetrics` (all `sy_*` metrics; see docs/METRICS.md). */
 export class PromMetrics implements GatewayMetrics {
   readonly registry = new Registry();
   private sources: ScrapeSources = {};

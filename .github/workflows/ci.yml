@@ -53,6 +53,32 @@ jobs:
       - run: pnpm build
       - run: pnpm test
 
+  package:
+    name: Package checks + tarball smoke (Node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0 (version from packageManager)
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: config.schema.json in sync, TSDoc on public API, publint, attw
+        run: pnpm check:package
+      - name: Pack, install the tarball in an empty project, run CLI + server + library
+        run: |
+          (cd packages/gateway && pnpm pack --pack-destination "$RUNNER_TEMP/pkg")
+          scripts/pack-smoke.sh "$RUNNER_TEMP"/pkg/switchyard-gateway-*.tgz
+
   security:
     name: Dependency audit, secret scan
     runs-on: ubuntu-24.04

@@ -13,3 +13,7 @@ observability/grafana/dashboards
 deploy/helm/switchyard/files
 # Terraform working dirs (providers/modules downloaded by `terraform init`)
 **/.terraform
+# generated from the zod schema (drift-checked by `schema:check` and the unit tests)
+packages/gateway/config.schema.json
+# raw k6 output written by bench/run.sh
+bench/results

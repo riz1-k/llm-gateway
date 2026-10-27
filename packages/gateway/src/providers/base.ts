@@ -25,6 +25,7 @@ export interface AttemptContext {
   attempt: number;
 }
 
+/** Result of an adapter health probe (`/readyz?probe=1`). */
 export interface ProviderHealth {
   ok: boolean;
   latencyMs?: number;
