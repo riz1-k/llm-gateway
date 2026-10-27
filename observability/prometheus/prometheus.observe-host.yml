@@ -1,0 +1,25 @@
+# Prometheus config for the host-mode observability stack (deploy/docker/docker-compose.observe-host.yml):
+# scrapes a gateway (and optional worker) running directly on this machine, e.g. `make dev` or the
+# portfolio's stable gateway on :8787. The container uses host networking, so 127.0.0.1 is the host.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: dev-host
+
+rule_files:
+  - /etc/prometheus/rules/alerts.yml
+
+scrape_configs:
+  - job_name: switchyard-gateway
+    metrics_path: /metrics # config/gateway.local.yaml serves metrics on the API port (no metrics.port)
+    static_configs:
+      - targets: ['127.0.0.1:8787']
+  # Only up when a separate `switchyard worker --port 9465` runs. With `usage.in_process_writer: true`
+  # (the local config) the gateway writes usage itself and this target is simply down.
+  - job_name: switchyard-worker
+    static_configs:
+      - targets: ['127.0.0.1:9465']
+  - job_name: prometheus
+    static_configs:
+      - targets: ['127.0.0.1:9092']

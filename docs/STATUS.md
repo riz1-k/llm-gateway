@@ -628,3 +628,96 @@ See [Release (wave M)](#release-wave-m). Follow-ups for later waves:
   `openai` SDK).
 - **Benchmarks** are sensitive to background load on this shared laptop; re-run `make bench` on
   a quiet machine before quoting numbers outside this repo.
+
+## Cross-project (O) — paused
+
+Paused 2026-10-27 ~16:25 IST on the user's request (stop at the next safe point). Nothing is committed;
+everything below is in the working trees of the three repos and passes their checks.
+
+### Done (brief O scope numbers)
+
+1. **Teams, keys, budgets.** `scripts/seed-portfolio.sh [--check] [docsqa] [opsagent]` (idempotent,
+   admin API only): ensures teams `docsqa` $50 / `opsagent` $50 / `evals` $100 (monthly, soft 0.8, block),
+   issues DB keys `portfolio-docsqa`, `portfolio-opsagent`, `portfolio-evals` (route allow-lists filtered
+   to existing routes) and writes them into the gitignored, mode-0600 `.env` files:
+   `docsqa/.env` (`LLM_API_KEY`, `EVAL_JUDGE_API_KEY`) and `opsagent/agent/.env` (`LLM_API_KEY`,
+   `EVAL_LLM_API_KEY`). Re-runs keep valid keys, revoke stale ones no `.env` references, refuse to write
+   into a non-gitignored file. `--check` → "in sync". Static `sk-sy-dev-*` keys untouched.
+2. **Audit** (no violations): `git -C <repo> grep -nIE '(localhost|127\.0\.0\.1|host\.docker\.internal)?:(808[123]|4096)\b|api\.openai\.com|api\.anthropic\.com|claude-(sonnet|haiku|opus)|gpt-[0-9]|qwen|embeddinggemma|jina-reranker|bge-reranker|github-copilot' -- ':!*.md' ':!**/tests/**' ':!**/*.test.*' ':!**/fixtures/**' ':!.github/**' ':!**/*.lock' ':!**/cassettes/**' ':!evals/**' ':!reports/**'`
+   on docsqa + opsagent. Hits are only gateway configs (`deploy/gateway.*.yaml`), labels
+   (`EMBEDDING_SPACE`), the documented opt-in direct llama.cpp mode (`EMBED_BASE_URL`, default empty =
+   gateway), a research script's optional `--base-url`, UI mock data and the opsagent scripted model
+   (`:8300`, not an LLM; routable through the hidden `opsagent-scripted` route). Clients use route names only.
+3. **Streamed cost** consumed: DocsQA `LLMClient.stream()` reads `usage.cost`/`usage.sy_cache` from the final
+   chunk (done event `usage.cost_usd` no longer 0); OpsAgent `GatewayChatOpenAI` keeps them in
+   `response_metadata["sy_usage"]`, `UsageTracker` uses them (`cost_source: gateway`). Verified against
+   `usage_events`: 54/54 DocsQA turns match to 6 dp (38 streamed); OpsAgent real run 0.022972 + 0.006417 =
+   the three `opsagent-chat` rows.
+   3b. **Attribution** in `usage_events`: DocsQA `x-sy-tags app:docsqa,feature:answer|condense|retrieve|verify|ingest|judge`
+   (+ caller tags e.g. `eval,case:q001`) and `x-sy-user` (opaque `u_…`/`guest`) on chat, embeddings and rerank;
+   OpsAgent `app:opsagent,node:agent|judge` (+ `eval,run:<id>`) and `x-sy-user` = the thread's operator.
+4. **observe-host stack**: `deploy/docker/docker-compose.observe-host.yml` + `make observe-host-up/down`
+   (host network, Prometheus 127.0.0.1:9092 scraping :8787/metrics + optional worker :9465, Grafana
+   127.0.0.1:3302 with K's provisioning — datasource URLs are now env-driven (`PROMETHEUS_URL`,
+   `GRAFANA_PG_HOST`), the full compose stack sets the old values). Verified: gateway target up, both
+   datasources healthy, 3 dashboards provisioned. Stopped with `down -v`. `capture.py --prefix` added
+   (`make screenshots SCREENSHOT_ARGS=--prefix=dev-`).
+5. **Failure modes** (scratch teams `o-scratch` $0.000001 and `o-ratelimit` rpm 3, both soft-deleted afterwards):
+
+   | Case           | DocsQA before                                                                                      | DocsQA after                                                               | OpsAgent before (HEAD 6ec6232)                                                                 | OpsAgent after                                                                                                   |
+   | -------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+   | budget 402     | SSE `error budget_exceeded` + friendly text; sync 402; BFF passes it through, UI alert             | unchanged (+ embeddings 402 mapped, tested)                                | `error budget_exceeded`, message = raw SDK text `LLM gateway error 402: Error code: 402 - {…}` | actionable message + gateway reason; run `error`, thread recoverable (next message on the same thread completed) |
+   | rate limit 429 | embed call retried 4× in ~5 s ignoring `retry-after: 26`, reported as "search service unavailable" | 1 attempt, `rate_limited` in 0.02 s (sync 429); short retry-after honoured | SDK retries once honouring retry-after                                                         | same + message "Wait N s" and `retry_after_s`                                                                    |
+   | gateway down   | `/readyz` 503 `gateway:false`; error in 5–6 s                                                      | unchanged                                                                  | no readiness endpoint, healthz ignored the gateway                                             | `/readyz` (db+mcp+gateway) 503, `healthz` shows `gateway`; clearer `LLM_UNAVAILABLE` text                        |
+
+### Traffic so far (2026-10-27 15:10–16:20 IST, stable gateway d9db543)
+
+DocsQA API: 4 personas × 12 questions + follow-ups on `mock-chat` (54 turns), 5 real turns (4 `docsqa-chat`
+
+- 1 `docsqa-fast`, one exact-cache hit saving $0.0101855), 3 turns via the UI BFF; evals team: offline tier
+  50 cases (39/50, = baseline) + full tier `--ids q001,q002` (2 chat + 2 judge). OpsAgent Agent API: 7 scripted
+  scenarios through the hidden `opsagent-scripted` route (3 approvals incl. senior + reject), 1 real
+  `opsagent-chat` run with approval. **Copilot upstream calls used: 12** (`select team,route,count(*) from
+usage_events where provider='copilot' and cache='miss' and ts > '2026-10-27 15:00+05:30' group by 1,2`:
+  docsqa/docsqa-chat 4, docsqa/docsqa-fast 1, evals/docsqa-chat 2, evals/docsqa-judge 2,
+  opsagent/opsagent-chat 3) — 8 left of O's 20.
+
+### Pending (to resume)
+
+- **5** screenshots `observability/screenshots/dev-*.png` (Cost & Budgets, Overview, Providers): Prometheus data
+  was deleted with `down -v`, so re-run `make observe-host-up`, generate a little fresh traffic (the scripts in
+  the traffic list above; free routes), then `make screenshots GRAFANA_URL=http://127.0.0.1:3302 SCREENSHOT_ARGS="--prefix=dev- --range now-1h"`
+  (build lock — it is a Playwright run). Also record `GET /admin/teams/:id/budget` and Prometheus
+  `sy_cost_usd_total{team}` outputs.
+- **6** document the matrix above in docsqa/opsagent docs (only here so far).
+- **7** Dogfooding section in the gateway README (`GET /admin/usage?group_by=team|route|model|provider`).
+- **8** "Part of a three-project portfolio" section in all three READMEs.
+- **9** STATUS entries in docsqa and opsagent (change lists below).
+- `usage_daily` is maintained by the in-process writer (`usage.in_process_writer: true`): no worker needed.
+
+### Changes per repo (uncommitted)
+
+- **llm-gateway**: `scripts/seed-portfolio.sh` (new), `deploy/docker/docker-compose.observe-host.yml` (new),
+  `observability/prometheus/prometheus.observe-host.yml` (new), `observability/grafana/provisioning/datasources/datasources.yml`
+  (env URLs), `deploy/docker/docker-compose.yml` (sets them), `Makefile` (observe-host targets, `SCREENSHOT_ARGS`,
+  promtool check of the new config), `observability/screenshots/capture.py` (`--prefix`), this section.
+  Checks: typecheck, eslint + prettier, promtool `check config` on both Prometheus configs.
+- **docsqa**: `generation/llm.py` (streamed cost, `CallContext.feature`/app tag), `generation/answer.py` and
+  `condense.py` (feature tags, attribution around retrieve/verify, 429/402 mapping), `inference/{attribution.py (new),_http.py,errors.py,embeddings.py,rerank.py,__init__.py}`
+  (retry-after-aware 429, `InferenceRateLimitedError`/`InferenceBudgetError`, per-request headers, ingest tag),
+  `cli.py` + `api/ingest_jobs.py` (ingest tag), `config.py` (`EVAL_JUDGE_API_KEY`), `evals/{cli,judge}.py`,
+  `.env.example`, tests (`tests/fakes*.py`, `test_llm_client.py`, `test_inference_clients.py`, `integration/api/test_chat.py`,
+  `evals/test_judge.py`). `make check`: 422 passed / 3 skipped, ruff + mypy clean.
+- **opsagent**: `agent/src/opsagent/gateway.py` (new), `runtime.py` (GatewayChatOpenAI, tags, attribution
+  http client, gateway health check), `api/routes/ops.py` (`/readyz`), `graph/runner.py` (attribution,
+  actionable LLM errors), `tracing.py` (streamed cost), `config.py` (`EVAL_LLM_API_KEY`), `evals/runner.py`
+  (eval key, judge tags), tests (`test_gateway_attribution.py` new, `test_tracing.py`, `test_gateway_mock.py`).
+  `make agent-lint agent-test`: clean, 114 passed; `make evals-replay`: 38/40, 0 input-hash mismatches,
+  vs baseline OK (report files moved out of the tree, `reports/latest.*` restored).
+
+### For the orchestrator / devenv
+
+- Nothing to make permanent: no worker is needed. Consumers now read DB keys from their `.env`; re-run
+  `scripts/seed-portfolio.sh` after a DB reset.
+- Scratch teams `o-scratch`, `o-ratelimit` are soft-deleted (slugs reserved, usage rows kept).
+- The opsagent dev store was reset twice (`pnpm reset`) for the traffic runs.

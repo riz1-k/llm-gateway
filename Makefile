@@ -6,6 +6,7 @@ IMAGE        ?= switchyard:dev
 VERSION      ?= $(shell node -p "require('./packages/gateway/package.json').version" 2>/dev/null || echo 0.0.0)
 REVISION     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 COMPOSE      := docker compose -f deploy/docker/docker-compose.yml
+OBSERVE_HOST := docker compose -f deploy/docker/docker-compose.observe-host.yml
 KIND_ENV     := deploy/terraform/envs/local-kind
 TOOLS_DIR    ?= $(or $(TMPDIR),/tmp)/switchyard-tools
 DEMO_SECONDS ?= 120
@@ -17,7 +18,7 @@ ENV_FILE     ?= .env
 .PHONY: help install build test test-live lint typecheck dev mock validate clean \
         schema check-package pack-smoke verdaccio-e2e bench \
         image compose-up compose-demo compose-down compose-stop compose-logs compose-ps \
-        dashboards dashboards-check screenshots chart-sync tools lint-alerts lint-helm lint-terraform lint-workflows lint-secrets audit lint-infra \
+        observe-host-up observe-host-down dashboards dashboards-check screenshots chart-sync tools lint-alerts lint-helm lint-terraform lint-workflows lint-secrets audit lint-infra \
         k8s-up k8s-demo k8s-down
 
 help:               ## show this help
@@ -101,6 +102,14 @@ compose-ps:
 	$(COMPOSE) ps
 
 # ── observability ────────────────────────────────────────────────────────────────────────────
+observe-host-up:    ## Prometheus :9092 + Grafana :3302 for a gateway running on this host (Linux, host network)
+	$(OBSERVE_HOST) up -d --wait --wait-timeout 180
+	@echo "grafana    http://127.0.0.1:$${OBSERVE_GRAFANA_PORT:-3302}   (admin / \$$GRAFANA_ADMIN_PASSWORD, default switchyard-local)"
+	@echo "prometheus http://127.0.0.1:$${OBSERVE_PROMETHEUS_PORT:-9092}  (scrapes 127.0.0.1:8787/metrics)"
+
+observe-host-down:  ## stop the host-mode observability stack and delete its volumes
+	$(OBSERVE_HOST) down -v --remove-orphans
+
 dashboards:         ## regenerate observability/grafana/dashboards/*.json
 	node observability/grafana/generate-dashboards.mjs
 
@@ -109,7 +118,7 @@ dashboards-check:   ## fail if the generated dashboards are stale
 
 screenshots:        ## PNGs of the three dashboards from Grafana at $(GRAFANA_URL) (needs uv + Chrome)
 	uv run --no-project observability/screenshots/capture.py --url $(GRAFANA_URL) \
-	  --password "$${GRAFANA_ADMIN_PASSWORD:-switchyard-local}"
+	  --password "$${GRAFANA_ADMIN_PASSWORD:-switchyard-local}" $(SCREENSHOT_ARGS)
 
 # ── infra linting (pinned tool binaries downloaded to $(TOOLS_DIR)) ──────────────────────────
 tools:              ## download promtool, kubeconform, actionlint, tflint, gitleaks
@@ -124,6 +133,7 @@ lint-alerts: tools  ## promtool check + unit-test the alert rules (+ chart copy 
 	$(TOOLS_DIR)/promtool check rules observability/prometheus/alerts.yml
 	$(TOOLS_DIR)/promtool test rules observability/prometheus/alerts.test.yml
 	$(TOOLS_DIR)/promtool check config --syntax-only observability/prometheus/prometheus.yml
+	$(TOOLS_DIR)/promtool check config --syntax-only observability/prometheus/prometheus.observe-host.yml
 
 lint-helm: tools    ## helm lint + kubeconform -strict on the rendered chart (every ci/*-values.yaml)
 	@mkdir -p $(TOOLS_DIR)/kubeconform-cache

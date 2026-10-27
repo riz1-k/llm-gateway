@@ -1,0 +1,80 @@
+# Switchyard — observability for a gateway running on this host (not in compose): Prometheus scrapes
+# the host gateway's /metrics, Grafana shows the provisioned dashboards with a Postgres datasource on
+# the host's `llmgateway` database. Reuses observability/grafana/{provisioning,dashboards} and the
+# alert rules of the full stack.
+#
+#   make observe-host-up      # Prometheus http://127.0.0.1:9092 · Grafana http://127.0.0.1:3302
+#   make observe-host-down    # stop and delete volumes
+#
+# Linux only: both containers use host networking so they can reach services bound to 127.0.0.1
+# (the gateway on :8787, Postgres on :5432). They listen on 127.0.0.1 only, on ports that do not
+# clash with the full compose stack (9091/3301) or the gateway.
+# The Postgres credentials default to the local dev placeholders used by config/gateway.local.yaml;
+# point GRAFANA_PG_USER/GRAFANA_PG_PASSWORD at a read-only role anywhere else (see
+# deploy/docker/postgres/10-grafana-reader.sh for the grants the full stack uses).
+name: switchyard-observe-host
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
+    network_mode: host
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=2d
+      - --web.listen-address=127.0.0.1:${OBSERVE_PROMETHEUS_PORT:-9092}
+    volumes:
+      - ../../observability/prometheus/prometheus.observe-host.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../observability/prometheus/alerts.yml:/etc/prometheus/rules/alerts.yml:ro
+      - promdata:/prometheus
+    healthcheck:
+      test: [CMD, wget, -q, --spider, 'http://127.0.0.1:${OBSERVE_PROMETHEUS_PORT:-9092}/-/ready']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    mem_limit: 256m
+    cpus: 0.5
+    restart: 'no'
+
+  grafana:
+    image: grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
+    network_mode: host
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: ${OBSERVE_GRAFANA_PORT:-3302}
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-switchyard-local}
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: 'false'
+      GF_NEWS_NEWS_FEED_ENABLED: 'false'
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/switchyard/switchyard-overview.json
+      PROMETHEUS_URL: http://127.0.0.1:${OBSERVE_PROMETHEUS_PORT:-9092}
+      GRAFANA_PG_HOST: ${GRAFANA_PG_HOST:-127.0.0.1:5432}
+      GRAFANA_PG_USER: ${GRAFANA_PG_USER:-dev}
+      GRAFANA_PG_PASSWORD: ${GRAFANA_PG_PASSWORD:-dev}
+    volumes:
+      - ../../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../observability/grafana/dashboards:/var/lib/grafana/dashboards/switchyard:ro
+      - grafanadata:/var/lib/grafana
+    depends_on:
+      prometheus: { condition: service_healthy }
+    healthcheck:
+      test: [CMD, wget, -q, --spider, 'http://127.0.0.1:${OBSERVE_GRAFANA_PORT:-3302}/api/health']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    mem_limit: 384m
+    cpus: 1.0
+    restart: 'no'
+
+volumes:
+  promdata:
+  grafanadata:

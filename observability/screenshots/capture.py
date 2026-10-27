@@ -5,12 +5,12 @@
 """Screenshots of the provisioned Switchyard dashboards.
 
     uv run observability/screenshots/capture.py --url http://127.0.0.1:3301 \
-        --password "$GRAFANA_ADMIN_PASSWORD" [--only cost] [--suffix=-kind] [--range now-30m]
+        --password "$GRAFANA_ADMIN_PASSWORD" [--only cost] [--suffix=-kind] [--prefix=dev-] [--range now-30m]
 
 Drives the locally installed Google Chrome (``--channel chrome``, no browser download) or
 Playwright's Chromium (``--channel chromium``). Logs in through Grafana's API, opens each dashboard
 in kiosk mode, waits for the panels to finish loading and writes
-observability/screenshots/<uid><suffix>.png.
+observability/screenshots/<prefix><uid><suffix>.png.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ def main() -> int:
     p.add_argument("--password", required=True)
     p.add_argument("--only", choices=sorted(DASHBOARDS), action="append")
     p.add_argument("--suffix", default="")
+    p.add_argument("--prefix", default="")
     p.add_argument("--range", default="now-30m")
     p.add_argument("--channel", default="chrome")
     p.add_argument("--height", type=int, default=2100, help="viewport height (whole dashboard)")
@@ -67,7 +68,7 @@ def main() -> int:
             page.wait_for_selector("[data-viz-panel-key], .react-grid-item", timeout=30_000)
             page.wait_for_load_state("networkidle")
             time.sleep(3)
-            path = out / f"{uid}{args.suffix}.png"
+            path = out / f"{args.prefix}{uid}{args.suffix}.png"
             page.screenshot(path=str(path))
             print(f"wrote {path}")
         browser.close()

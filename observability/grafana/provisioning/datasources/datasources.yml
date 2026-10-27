@@ -1,5 +1,7 @@
-# Grafana datasources for the docker compose stack. UIDs are referenced by the dashboards'
-# default datasource variables; credentials come from the container environment.
+# Grafana datasources, shared by the docker compose stack (docker-compose.yml) and the host-mode
+# stack (docker-compose.observe-host.yml). UIDs are referenced by the dashboards' default datasource
+# variables; URLs and credentials come from the container environment (PROMETHEUS_URL,
+# GRAFANA_PG_HOST, GRAFANA_PG_USER, GRAFANA_PG_PASSWORD), which each compose file sets.
 apiVersion: 1
 
 datasources:
@@ -7,7 +9,7 @@ datasources:
     uid: prometheus
     type: prometheus
     access: proxy
-    url: http://prometheus:9090
+    url: ${PROMETHEUS_URL}
     isDefault: true
     editable: false
     jsonData:
@@ -18,7 +20,7 @@ datasources:
     uid: switchyard-postgres
     type: grafana-postgresql-datasource
     access: proxy
-    url: postgres:5432
+    url: ${GRAFANA_PG_HOST}
     user: ${GRAFANA_PG_USER}
     editable: false
     jsonData:
