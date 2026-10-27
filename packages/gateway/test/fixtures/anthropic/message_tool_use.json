@@ -1,0 +1,19 @@
+{
+  "id": "msg_01NonStream",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-4-5",
+  "content": [
+    { "type": "thinking", "thinking": "Need the order first.", "signature": "sig" },
+    { "type": "text", "text": "Checking the order." },
+    { "type": "tool_use", "id": "toolu_01X", "name": "get_order", "input": { "order_id": "ORD-1" } }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 100,
+    "cache_creation_input_tokens": 20,
+    "cache_read_input_tokens": 300,
+    "output_tokens": 45
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "name": "switchyard-gateway",
+  "version": "0.1.0",
+  "description": "Switchyard: OpenAI-compatible LLM gateway with routing, fallback, circuit breaking, and provider emulation (tool calling / JSON mode) for non-OpenAI backends.",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "llm",
+    "gateway",
+    "openai",
+    "anthropic",
+    "proxy",
+    "fallback",
+    "circuit-breaker",
+    "hono"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "bin": {
+    "switchyard": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./mock-provider": {
+      "types": "./dist/mock-provider.d.ts",
+      "import": "./dist/mock-provider.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsx src/cli.ts serve --config ../../config/gateway.local.yaml",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:live": "SWITCHYARD_LIVE=1 vitest run --config vitest.live.config.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.5",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "hono": "4.13.14",
+    "js-tiktoken": "1.0.21",
+    "nanoid": "6.0.2",
+    "pino": "10.4.0",
+    "yaml": "2.9.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@switchyard/mock-provider": "workspace:*",
+    "openai": "7.45.0",
+    "pino-pretty": "13.2.0",
+    "tsdown": "0.23.2"
+  }
+}

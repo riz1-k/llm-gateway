@@ -1,0 +1,248 @@
+import { ProviderError, parseRetryAfter, providerErrorFromStatus } from '../../core/errors.js';
+import type { OpencodeProviderConfig } from '../../config/schema.js';
+import { joinUrl } from '../base.js';
+import { extractUpstreamMessage, mapFetchError, type FetchLike } from '../http.js';
+import type { OpencodePart } from './transcript.js';
+
+/** Minimal typed client for the subset of the opencode server API the adapter uses. */
+
+export interface OpencodeTokens {
+  input?: number;
+  output?: number;
+  reasoning?: number;
+  cache?: { read?: number; write?: number };
+}
+
+export interface OpencodeErrorInfo {
+  name: string;
+  data?: {
+    message?: string;
+    statusCode?: number;
+    isRetryable?: boolean;
+    responseHeaders?: Record<string, string>;
+    providerID?: string;
+  };
+}
+
+export interface OpencodeMessageInfo {
+  id: string;
+  sessionID: string;
+  role: 'assistant' | 'user';
+  tokens?: OpencodeTokens;
+  error?: OpencodeErrorInfo;
+  finish?: string;
+  modelID?: string;
+  providerID?: string;
+}
+
+export interface OpencodeResultPart {
+  id?: string;
+  type: string;
+  text?: string;
+}
+
+export interface OpencodeMessageResult {
+  info: OpencodeMessageInfo;
+  parts: OpencodeResultPart[];
+}
+
+export interface PromptBody {
+  agent: string;
+  model: { providerID: string; modelID: string };
+  system?: string;
+  variant?: string;
+  parts: OpencodePart[];
+}
+
+export class OpencodeClient {
+  readonly authHeader: string | undefined;
+
+  constructor(
+    private readonly provider: string,
+    private readonly config: OpencodeProviderConfig,
+    private readonly fetchImpl: FetchLike = fetch,
+  ) {
+    this.authHeader = config.password
+      ? `Basic ${Buffer.from(`${config.username}:${config.password}`).toString('base64')}`
+      : undefined;
+  }
+
+  get headers(): Record<string, string> {
+    return {
+      ...this.config.headers,
+      ...(this.authHeader ? { authorization: this.authHeader } : {}),
+    };
+  }
+
+  url(path: string): string {
+    return joinUrl(this.config.base_url, path);
+  }
+
+  private async request<T>(
+    method: string,
+    path: string,
+    body: unknown,
+    signal: AbortSignal,
+  ): Promise<T> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(this.url(path), {
+        method,
+        headers: {
+          ...this.headers,
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        },
+        body: body === undefined ? null : JSON.stringify(body),
+        signal,
+      });
+    } catch (err) {
+      throw mapFetchError(this.provider, err, signal);
+    }
+    const text = await res.text().catch((err: unknown) => {
+      throw mapFetchError(this.provider, err, signal);
+    });
+    if (!res.ok) {
+      const message = `${this.provider}: opencode ${method} ${path.split('?')[0]} → ${res.status}: ${extractUpstreamMessage(text)}`;
+      if (res.status === 401 || res.status === 403) {
+        throw new ProviderError({
+          status: 502,
+          code: 'upstream_auth',
+          message,
+          provider: this.provider,
+          fallback: true,
+        });
+      }
+      throw providerErrorFromStatus(
+        this.provider,
+        res.status,
+        message,
+        parseRetryAfter(res.headers.get('retry-after')),
+      );
+    }
+    if (!text) return undefined as T;
+    try {
+      return JSON.parse(text) as T;
+    } catch (err) {
+      throw new ProviderError({
+        status: 502,
+        code: 'upstream_error',
+        message: `${this.provider}: opencode returned invalid JSON`,
+        provider: this.provider,
+        retryable: true,
+        cause: err,
+      });
+    }
+  }
+
+  async createSession(title: string, signal: AbortSignal): Promise<string> {
+    const s = await this.request<{ id?: string }>(
+      'POST',
+      '/session',
+      { title, agent: this.config.agent },
+      signal,
+    );
+    if (!s?.id) {
+      throw new ProviderError({
+        status: 502,
+        code: 'upstream_error',
+        message: `${this.provider}: session creation returned no id`,
+        provider: this.provider,
+        retryable: true,
+      });
+    }
+    return s.id;
+  }
+
+  /** Sends a message and waits for the complete assistant reply. */
+  prompt(sessionId: string, body: PromptBody, signal: AbortSignal): Promise<OpencodeMessageResult> {
+    return this.request<OpencodeMessageResult>(
+      'POST',
+      `/session/${encodeURIComponent(sessionId)}/message`,
+      body,
+      signal,
+    );
+  }
+
+  async abort(sessionId: string, signal: AbortSignal): Promise<void> {
+    await this.request<unknown>(
+      'POST',
+      `/session/${encodeURIComponent(sessionId)}/abort`,
+      undefined,
+      signal,
+    );
+  }
+
+  async deleteSession(sessionId: string, signal: AbortSignal): Promise<void> {
+    await this.request<unknown>(
+      'DELETE',
+      `/session/${encodeURIComponent(sessionId)}`,
+      undefined,
+      signal,
+    );
+  }
+
+  async health(signal: AbortSignal): Promise<{ healthy: boolean; version?: string }> {
+    return this.request<{ healthy: boolean; version?: string }>(
+      'GET',
+      '/global/health',
+      undefined,
+      signal,
+    );
+  }
+}
+
+/** Maps an opencode assistant-message error into a classified ProviderError. */
+export function mapOpencodeError(provider: string, error: OpencodeErrorInfo): ProviderError {
+  const message = `${provider}: ${error.name}: ${error.data?.message ?? 'unknown error'}`;
+  switch (error.name) {
+    case 'ProviderAuthError':
+      return new ProviderError({
+        status: 502,
+        code: 'upstream_auth',
+        message,
+        provider,
+        fallback: true,
+      });
+    case 'ContextOverflowError':
+      return new ProviderError({ status: 400, code: 'invalid_request', message, provider });
+    case 'MessageAbortedError':
+      return new ProviderError({
+        status: 504,
+        code: 'upstream_timeout',
+        message,
+        provider,
+        retryable: true,
+      });
+    case 'APIError': {
+      const status = error.data?.statusCode;
+      const headers = error.data?.responseHeaders ?? {};
+      const retryAfter = parseRetryAfter(headers['retry-after'] ?? headers['Retry-After']);
+      if (status === 401 || status === 403) {
+        return new ProviderError({
+          status: 502,
+          code: 'upstream_auth',
+          message,
+          provider,
+          fallback: true,
+        });
+      }
+      if (status !== undefined)
+        return providerErrorFromStatus(provider, status, message, retryAfter);
+      return new ProviderError({
+        status: 502,
+        code: 'upstream_error',
+        message,
+        provider,
+        retryable: error.data?.isRetryable ?? true,
+      });
+    }
+    default:
+      return new ProviderError({
+        status: 502,
+        code: 'upstream_error',
+        message,
+        provider,
+        retryable: true,
+      });
+  }
+}

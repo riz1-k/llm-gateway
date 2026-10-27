@@ -1,0 +1,133 @@
+import { serve, type ServerType } from '@hono/node-server';
+import type { AddressInfo } from 'node:net';
+import OpenAI from 'openai';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createGateway, type Gateway } from '../../src/app.js';
+import { silentLogger } from '../../src/observability/logger.js';
+import { KEY, testConfig } from '../helpers.js';
+
+/** The official `openai` SDK must work unmodified against the gateway (real HTTP, mock upstream). */
+let server: ServerType;
+let gateway: Gateway;
+let client: OpenAI;
+
+beforeAll(async () => {
+  gateway = createGateway({
+    logger: silentLogger(),
+    config: testConfig({
+      providers: { mock: { type: 'mock', allow_header_faults: true, embedding_dim: 32 } },
+      models: {
+        echo: { provider: 'mock', model: 'mock-echo' },
+        down: { provider: 'mock', model: 'mock-echo', options: { fault: { status: 503 } } },
+        tools: { provider: 'mock', model: 'mock-tools' },
+        emb: { provider: 'mock', model: 'mock-embed', kind: 'embedding' },
+      },
+      routes: {
+        chat: { targets: ['down', 'echo'] },
+        agent: { targets: ['tools'] },
+        embed: { targets: ['emb'] },
+      },
+    }),
+  });
+  server = await new Promise<ServerType>((resolve) => {
+    const s = serve({ fetch: gateway.app.fetch, port: 0, hostname: '127.0.0.1' }, () => resolve(s));
+  });
+  const { port } = server.address() as AddressInfo;
+  client = new OpenAI({ apiKey: KEY, baseURL: `http://127.0.0.1:${port}/v1`, maxRetries: 0 });
+});
+
+afterAll(async () => {
+  await new Promise<void>((r) => server.close(() => r()));
+  await gateway.close();
+});
+
+describe('openai SDK contract', () => {
+  it('lists models', async () => {
+    const page = await client.models.list();
+    expect(page.data.map((m) => m.id).sort()).toEqual(['agent', 'chat', 'embed']);
+  });
+
+  it('chat completion (with fallback) and raw headers', async () => {
+    const { data, response } = await client.chat.completions
+      .create({ model: 'chat', messages: [{ role: 'user', content: 'hello sdk' }] })
+      .withResponse();
+    expect(data.choices[0]!.message.content).toBe('hello sdk');
+    expect(data.usage?.total_tokens).toBeGreaterThan(0);
+    expect(response.headers.get('x-sy-fallbacks')).toBe('1');
+    expect(response.headers.get('x-request-id')).toBeTruthy();
+  });
+
+  it('streaming with include_usage', async () => {
+    const stream = await client.chat.completions.create({
+      model: 'chat',
+      stream: true,
+      stream_options: { include_usage: true },
+      messages: [{ role: 'user', content: 'streamed words arrive in pieces' }],
+    });
+    let text = '';
+    let usage: OpenAI.CompletionUsage | null | undefined;
+    for await (const chunk of stream) {
+      text += chunk.choices[0]?.delta.content ?? '';
+      if (chunk.usage) usage = chunk.usage;
+    }
+    expect(text).toBe('streamed words arrive in pieces');
+    expect(usage?.completion_tokens).toBeGreaterThan(0);
+  });
+
+  it('tool calling round trip', async () => {
+    const tools: OpenAI.ChatCompletionTool[] = [
+      {
+        type: 'function',
+        function: {
+          name: 'get_order',
+          parameters: {
+            type: 'object',
+            properties: { order_id: { type: 'string' } },
+            required: ['order_id'],
+          },
+        },
+      },
+    ];
+    const first = await client.chat.completions.create({
+      model: 'agent',
+      tools,
+      messages: [{ role: 'user', content: 'Where is my order?' }],
+    });
+    const call = first.choices[0]!.message.tool_calls![0]!;
+    expect(first.choices[0]!.finish_reason).toBe('tool_calls');
+    expect(call.type).toBe('function');
+    const second = await client.chat.completions.create({
+      model: 'agent',
+      tools,
+      messages: [
+        { role: 'user', content: 'Where is my order?' },
+        first.choices[0]!.message,
+        { role: 'tool', tool_call_id: call.id, content: '{"status":"shipped"}' },
+      ],
+    });
+    expect(second.choices[0]!.finish_reason).toBe('stop');
+    expect(second.choices[0]!.message.content).toContain('shipped');
+  });
+
+  it('embeddings (float and base64 decoding by the SDK)', async () => {
+    const res = await client.embeddings.create({ model: 'embed', input: ['alpha', 'beta'] });
+    expect(res.data).toHaveLength(2);
+    expect(res.data[0]!.embedding).toHaveLength(32);
+  });
+
+  it('errors surface as typed SDK errors with the gateway code', async () => {
+    const err = await client.chat.completions
+      .create({ model: 'missing', messages: [{ role: 'user', content: 'x' }] })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(OpenAI.NotFoundError);
+    expect((err as InstanceType<typeof OpenAI.APIError>).code).toBe('model_not_found');
+    const auth = await new OpenAI({
+      apiKey: 'sk-wrong',
+      baseURL: client.baseURL,
+      maxRetries: 0,
+    }).models
+      .list()
+      .catch((e: unknown) => e);
+    expect(auth).toBeInstanceOf(OpenAI.AuthenticationError);
+  });
+});
