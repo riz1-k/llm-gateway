@@ -1,0 +1,7 @@
+# gitleaks config: default rules + narrowly scoped allowlists for known false positives.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Placeholder virtual keys in docs/tests/dev configs (real keys are sk-sy- + 40 random base62 chars)"
+regexes = ['''sk-sy-(dev|ci|test|local|demo|dup|example)[A-Za-z0-9-]*''']
