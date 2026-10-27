@@ -18,6 +18,10 @@ Actions. A release produces:
    - changesets are pending → `version`;
    - no changesets, and a package version that is not on npm yet → `publish`;
    - otherwise → nothing to do.
+
+   The release is opt-in: until the repository variable `RELEASE_ENABLED` is `true`, the run
+   stops here with a notice, so fresh clones and forks never attempt a publish.
+
 2. **version** opens or updates the "Version Packages" pull request. It bumps
    `packages/gateway/package.json`, writes `CHANGELOG.md`, regenerates `config.schema.json` and
    `docs/CONFIG.md`, and refreshes the lockfile.
@@ -39,7 +43,7 @@ gate.
 ### First release
 
 The repository starts at version **0.1.0**, with no pending changesets. The first push to `main`
-after setup therefore goes straight to `publish` mode and releases 0.1.0 as it is, without a
+(or Release re-run) after setup, i.e. once `RELEASE_ENABLED` is `true`, therefore goes straight to `publish` mode and releases 0.1.0 as it is, without a
 version bump. Its changelog entry is already written in `packages/gateway/CHANGELOG.md`.
 
 ## One-time setup (owner)
@@ -58,6 +62,8 @@ very first publish uses a token, and every later one uses OIDC.
      all packages, with a short expiry (for example 7 days).
    - Add it as a secret named **`NPM_TOKEN`**, either on the `npm` environment or on the
      repository.
+   - Settings → Secrets and variables → Actions → **Variables** → add **`RELEASE_ENABLED`** with
+     the value `true` (the switch that turns the release automation on).
    - Push to `main`, or re-run the Release workflow. 0.1.0 is published with provenance, and the
      tag, GitHub Release, GitHub Packages copy and GHCR image follow.
 3. **Switch to trusted publishing:**

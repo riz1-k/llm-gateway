@@ -8,6 +8,9 @@
 #
 # The first release publishes the current 0.1.0 as-is (no changeset is pending, the version is not
 # on npm yet). One-time setup and the trusted-publishing switch: docs/RELEASING.md.
+#
+# Opt-in: nothing is versioned or published until the repository variable RELEASE_ENABLED is
+# 'true', so fresh clones and forks stop after select-mode with a notice instead of a failed publish.
 name: Release
 
 on:
@@ -43,11 +46,16 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - id: select-mode
         uses: changesets/action/select-mode@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+      - name: Report a disabled release
+        if: (steps.select-mode.outputs.mode == 'version' || steps.select-mode.outputs.mode == 'publish') && vars.RELEASE_ENABLED != 'true'
+        env:
+          MODE: ${{ steps.select-mode.outputs.mode }}
+        run: echo "::notice title=Release disabled::mode '${MODE}' selected, but the repository variable RELEASE_ENABLED is not 'true', so nothing is versioned or published (docs/RELEASING.md)."
 
   version:
     name: Open or update the Version Packages PR
     needs: select-mode
-    if: needs.select-mode.outputs.mode == 'version'
+    if: needs.select-mode.outputs.mode == 'version' && vars.RELEASE_ENABLED == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -73,7 +81,7 @@ jobs:
   pack:
     name: Build and pack
     needs: select-mode
-    if: needs.select-mode.outputs.mode == 'publish'
+    if: needs.select-mode.outputs.mode == 'publish' && vars.RELEASE_ENABLED == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
