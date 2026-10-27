@@ -113,6 +113,18 @@ describe('fallback & retries', () => {
     expect(await res.json()).toMatchObject({ error: { code: 'upstream_timeout' } });
   });
 
+  it('keeps the 504 when the attempt timer fires before the clock reaches the deadline', async () => {
+    // Node timers can fire a few ms before Date.now() reaches the deadline they were computed from (seen in CI as a
+    // 200 from the echo2 fallback). A clock running at 90% speed makes that skew deterministic.
+    const t0 = Date.now();
+    const clock = (): number => t0 + Math.floor((Date.now() - t0) * 0.9);
+    const { chat, usage } = testGateway(testConfig(base), { clock });
+    const res = await chat({ model: 'deadline', messages: msg('x') });
+    expect(res.status).toBe(504);
+    expect(await res.json()).toMatchObject({ error: { code: 'upstream_timeout' } });
+    expect(usage.events[0]!.attempts).toBe(1); // no fallback attempt after the deadline was spent
+  });
+
   it('header faults can target one model (x-mock-fault-target)', async () => {
     const { chat } = testGateway(
       testConfig({ ...base, routes: { pair: { targets: ['echo', 'echo2'] } } }),

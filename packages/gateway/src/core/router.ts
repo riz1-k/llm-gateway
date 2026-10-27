@@ -228,10 +228,12 @@ export class Router {
         }
 
         const started = this.clock();
-        const attemptTimeout = Math.min(
-          target.timeoutMs ?? model.timeoutMs,
-          dctx.deadline - started,
-        );
+        const targetTimeoutMs = target.timeoutMs ?? model.timeoutMs;
+        const attemptTimeout = Math.min(targetTimeoutMs, dctx.deadline - started);
+        // When the route deadline, not the target's own timeout, bounds this attempt, its timer firing means the
+        // deadline is spent. Timers can fire a few ms before the clock reaches the deadline, so don't let a clock
+        // re-check start a fallback in that sliver.
+        const deadlineBound = attemptTimeout < targetTimeoutMs;
         const scope = scopedSignal(dctx.signal, attemptTimeout, `${model.name} attempt`);
         let release: (() => void) | undefined;
         let finished = false;
@@ -329,6 +331,7 @@ export class Router {
             'upstream attempt failed',
           );
           if (err.code === 'aborted') throw err;
+          if (deadlineBound && scope.timedOut()) throw this.deadlineError(dctx, err);
           if (!err.retryable && !err.fallback) throw err;
           lastError = err;
           if (!err.retryable || attempt >= route.retry.attempts) break;
