@@ -1,0 +1,32 @@
+{
+  "name": "switchyard",
+  "private": true,
+  "description": "Switchyard — an OpenAI-compatible LLM gateway (monorepo root)",
+  "type": "module",
+  "packageManager": "pnpm@11.24.0",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter ./packages/mock-provider --filter ./packages/gateway run build",
+    "test": "pnpm -r run test",
+    "test:live": "pnpm --filter switchyard-gateway run test:live",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "typecheck": "pnpm -r run typecheck",
+    "dev": "bash scripts/dev.sh",
+    "mock": "pnpm --filter switchyard-gateway exec tsx src/cli.ts mock-provider --port 8790"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "26.6.5",
+    "eslint": "10.13.0",
+    "eslint-config-prettier": "10.1.8",
+    "globals": "17.13.0",
+    "prettier": "3.9.10",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.1",
+    "vitest": "5.0.5"
+  }
+}
