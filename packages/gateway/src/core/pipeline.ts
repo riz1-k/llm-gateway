@@ -18,7 +18,16 @@ import {
   estimateTextTokens,
   newTokenBudget,
 } from '../limits/estimate.js';
+import type { Attributes, Context } from '@opentelemetry/api';
+import { NoopBudgetGuard } from '../limits/budgets.js';
+import { NoopRateLimiter } from '../limits/ratelimit.js';
 import { noopMetrics, type GatewayMetrics } from '../observability/metrics.js';
+import {
+  addEvent,
+  inChildSpan,
+  recordFailure,
+  type RequestSpan,
+} from '../observability/tracing.js';
 import { computeCost, estimateCost, formatUsd } from '../usage/pricing.js';
 import { encodeSSE, SSE_DONE } from '../util/sse.js';
 import { ChunkAccumulator, isMeaningfulChunk, responseToChunks } from './chunks.js';
@@ -72,6 +81,8 @@ export interface RequestContext {
   endUser: string | undefined;
   tags: string[];
   cacheMode: CacheMode;
+  /** Server span of the request (tracing); stage and attempt spans become its children. */
+  trace?: RequestSpan | undefined;
 }
 
 export type PipelineResult =
@@ -122,6 +133,24 @@ interface SemanticPending {
 }
 
 const DEFAULT_COMPLETION_ESTIMATE = 1024;
+
+/** `gen_ai.request.*` attributes of a chat request (sampling parameters only, never content). */
+function chatRequestAttributes(req: ChatRequest): Attributes {
+  const a: Attributes = {};
+  const maxTokens = req.max_completion_tokens ?? req.max_tokens;
+  if (maxTokens != null) a['gen_ai.request.max_tokens'] = maxTokens;
+  if (req.temperature != null) a['gen_ai.request.temperature'] = req.temperature;
+  if (req.top_p != null) a['gen_ai.request.top_p'] = req.top_p;
+  if (req.frequency_penalty != null) a['gen_ai.request.frequency_penalty'] = req.frequency_penalty;
+  if (req.presence_penalty != null) a['gen_ai.request.presence_penalty'] = req.presence_penalty;
+  if (req.seed != null) a['gen_ai.request.seed'] = req.seed;
+  if (req.n != null && req.n !== 1) a['gen_ai.request.choice.count'] = req.n;
+  if (req.reasoning_effort != null) a['gen_ai.request.reasoning.level'] = req.reasoning_effort;
+  if (req.stream === true) a['gen_ai.request.stream'] = true;
+  const format = req.response_format?.type;
+  if (format) a['gen_ai.output.type'] = format === 'text' ? 'text' : 'json';
+  return a;
+}
 
 /** Adds the Switchyard cost extension fields to a usage object (never mutates the input). */
 function usageWithCost(usage: Usage, costUsd: number, o: Outcome): Usage {
@@ -228,6 +257,34 @@ export class Pipeline {
     // The budget check only reads, so it runs concurrently with the rate-limit check (one Redis
     // round-trip on the request path instead of two). Its result is used only when the rate
     // limiter admits the request; a rate-limit rejection still wins.
+    const { rateLimiter, budgets } = this.services;
+    if (rateLimiter instanceof NoopRateLimiter && budgets instanceof NoopBudgetGuard)
+      return this.admitInner(rctx, route, promptTokens, maxCompletion);
+    return inChildSpan(rctx.trace?.context, 'sy.limits', async (span) => {
+      try {
+        const admission = await this.admitInner(rctx, route, promptTokens, maxCompletion);
+        if (span.isRecording())
+          span.setAttributes({ 'sy.ratelimit.result': 'allowed', 'sy.budget.result': 'allowed' });
+        return admission;
+      } catch (err) {
+        if (span.isRecording() && err instanceof GatewayError) {
+          span.setAttributes(
+            err.status === 429
+              ? { 'sy.ratelimit.result': 'rejected' }
+              : { 'sy.ratelimit.result': 'allowed', 'sy.budget.result': 'rejected' },
+          );
+        }
+        throw err;
+      }
+    });
+  }
+
+  private async admitInner(
+    rctx: RequestContext,
+    route: ResolvedRoute,
+    promptTokens: number,
+    maxCompletion: number,
+  ): Promise<Admission> {
     const preflightCostUsd = estimateCost(promptTokens, maxCompletion, this.maxPricing(route));
     const budgetCheck = this.services.budgets.check({
       team: rctx.key.team,
@@ -276,6 +333,7 @@ export class Pipeline {
     rctx: RequestContext,
     route: ResolvedRoute,
     attempts: AttemptRecord[],
+    trace?: { context?: Context | undefined; request?: Attributes },
   ): DispatchContext {
     return {
       requestId: rctx.requestId,
@@ -285,6 +343,8 @@ export class Pipeline {
       requestHeaders: rctx.headers,
       deadline: rctx.startedAt + route.timeoutMs,
       attempts,
+      traceContext: trace?.context ?? rctx.trace?.context,
+      ...(trace?.request ? { genAiRequest: trace.request } : {}),
     };
   }
 
@@ -394,6 +454,7 @@ export class Pipeline {
     } catch (err) {
       rctx.logger.error({ err }, 'usage emission failed');
     }
+    this.traceOutcome(rctx, event, o);
     try {
       this.metrics.request(event);
       this.observeAttempts(route, o.attempts);
@@ -422,6 +483,31 @@ export class Pipeline {
       },
       'request completed',
     );
+  }
+
+  /** Summary of the request on its server span: route, cache, served target, usage, cost. */
+  private traceOutcome(rctx: RequestContext, event: UsageEvent, o: Outcome): void {
+    const rs = rctx.trace;
+    if (!rs?.recording) return;
+    const a: Attributes = {
+      'sy.route': event.route,
+      'sy.cache': event.cache,
+      'sy.stream': event.stream,
+      'sy.cost_usd': event.cost_usd,
+      'sy.usage.input_tokens': event.prompt_tokens,
+      'sy.usage.output_tokens': event.completion_tokens,
+      'sy.attempts': event.attempts,
+      'sy.fallbacks': event.fallbacks,
+    };
+    if (event.provider) a['sy.provider'] = event.provider;
+    if (event.model) a['sy.model'] = event.model;
+    if (o.model) a['sy.target'] = o.model.name;
+    if (event.saved_usd > 0) a['sy.saved_usd'] = event.saved_usd;
+    if (event.ttft_ms !== null) a['sy.ttft_ms'] = event.ttft_ms;
+    if (event.error_code) a['sy.error.code'] = event.error_code;
+    rs.setAttributes(a);
+    // A stream fails after its 200 went out: the HTTP status cannot say so, the span must.
+    if (o.stream && event.status >= 500) recordFailure(rs.span, event.error_code ?? 'error');
   }
 
   /** Derives retry/fallback counters from the attempt log (bounded labels: targets, codes). */
@@ -480,7 +566,11 @@ export class Pipeline {
       return null;
     }
     try {
-      const hit = await this.services.cache.get(key);
+      const hit = await inChildSpan(rctx.trace?.context, 'sy.cache.exact', async (span) => {
+        const entry = await this.services.cache.get(key);
+        if (span.isRecording()) span.setAttribute('sy.cache.result', entry ? 'hit' : 'miss');
+        return entry;
+      });
       this.metrics.cacheLookup(route.name, 'exact', hit ? 'hit' : 'miss');
       return hit;
     } catch (err) {
@@ -529,11 +619,12 @@ export class Pipeline {
     rctx: RequestContext,
     embedRouteName: string,
     text: string,
+    traceContext: Context | undefined,
   ): Promise<number[] | null> {
     const embedRoute = this.config.routes[embedRouteName];
     if (!embedRoute || embedRoute.kind !== 'embedding') return null;
     const { value } = await this.deps.router.dispatch(
-      this.dispatchContext(rctx, embedRoute, []),
+      this.dispatchContext(rctx, embedRoute, [], { context: traceContext }),
       'embedding',
       (adapter, m, actx) =>
         adapter.embed!(
@@ -558,8 +649,23 @@ export class Pipeline {
     const sem = route.cache!.semantic!;
     const q = semanticQuery(req);
     if (!q) return null;
+    return inChildSpan(rctx.trace?.context, 'sy.cache.semantic', async (span, ctx) => {
+      const r = await this.semanticLookupInner(rctx, route, sem, q, ctx);
+      if (span.isRecording())
+        span.setAttribute('sy.cache.result', !r ? 'error' : 'hit' in r ? 'hit' : 'miss');
+      return r;
+    });
+  }
+
+  private async semanticLookupInner(
+    rctx: RequestContext,
+    route: ResolvedRoute,
+    sem: NonNullable<NonNullable<ResolvedRoute['cache']>['semantic']>,
+    q: NonNullable<ReturnType<typeof semanticQuery>>,
+    traceContext: Context | undefined,
+  ): Promise<{ hit: CacheEntry; similarity: number } | { pending: SemanticPending } | null> {
     try {
-      const vector = await this.embedForSemantic(rctx, sem.embed_route!, q.text);
+      const vector = await this.embedForSemantic(rctx, sem.embed_route!, q.text, traceContext);
       if (!vector) return null;
       const index = `${route.name}:${cacheScope(route, rctx.key.team.slug)}:${q.scope}`;
       const pending = { index, vector, ttl: this.chatTtl(route) };
@@ -696,7 +802,9 @@ export class Pipeline {
         };
       }
 
-      const dctx = this.dispatchContext(rctx, route, o.attempts);
+      const dctx = this.dispatchContext(rctx, route, o.attempts, {
+        ...(rctx.trace?.recording ? { request: chatRequestAttributes(req) } : {}),
+      });
       if (stream) {
         const { model, stream: chunks } = await this.deps.router.dispatchStream(
           dctx,
@@ -750,27 +858,33 @@ export class Pipeline {
     const acc = new ChunkAccumulator();
     const iterator = chunks[Symbol.asyncIterator]();
     let finished = false;
+    // The server span stays open until usage and cost are on it.
+    const release = rctx.trace?.hold();
     const finalize = async (failure?: unknown): Promise<void> => {
       if (finished) return;
       finished = true;
-      if (failure !== undefined) {
-        const g = toGatewayError(failure);
-        o.status = g.status;
-        o.errorCode = g.code;
-      }
-      if (o.cache !== 'hit' && o.cache !== 'semantic-hit' && o.model) {
-        o.usage = acc.usage;
-        o.costUsd = computeCost(acc.usage, o.model.pricing).costUsd;
-        const finish = acc.finishReason;
-        if (
-          failure === undefined &&
-          (finish === 'stop' || finish === 'tool_calls' || finish === 'length')
-        ) {
-          this.cacheSet(cacheKey, route, { kind: 'chat', response: acc.toResponse() }, o, rctx);
-          this.semanticIndex(pending, cacheKey, rctx);
+      try {
+        if (failure !== undefined) {
+          const g = toGatewayError(failure);
+          o.status = g.status;
+          o.errorCode = g.code;
         }
+        if (o.cache !== 'hit' && o.cache !== 'semantic-hit' && o.model) {
+          o.usage = acc.usage;
+          o.costUsd = computeCost(acc.usage, o.model.pricing).costUsd;
+          const finish = acc.finishReason;
+          if (
+            failure === undefined &&
+            (finish === 'stop' || finish === 'tool_calls' || finish === 'length')
+          ) {
+            this.cacheSet(cacheKey, route, { kind: 'chat', response: acc.toResponse() }, o, rctx);
+            this.semanticIndex(pending, cacheKey, rctx);
+          }
+        }
+        await this.account(rctx, route, 'chat', o, admission);
+      } finally {
+        release?.();
       }
-      await this.account(rctx, route, 'chat', o, admission);
     };
 
     const toClient = (chunk: ChatChunk): ChatChunk | undefined => {
@@ -800,8 +914,10 @@ export class Pipeline {
             return;
           }
           acc.push(next.value);
-          if (o.ttftMs === null && isMeaningfulChunk(next.value))
+          if (o.ttftMs === null && isMeaningfulChunk(next.value)) {
             o.ttftMs = this.clock() - rctx.startedAt;
+            addEvent(rctx.trace?.context, 'sy.first_token', { 'sy.ttft_ms': o.ttftMs });
+          }
           const out = toClient(next.value);
           if (out) controller.enqueue(encodeSSE(JSON.stringify(out)));
         } catch (err) {

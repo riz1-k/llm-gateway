@@ -305,8 +305,65 @@ Check the TSDoc in your editor for the exact record shapes, for example `ApiKeyR
   into your logger.
 - **Metrics:** pass `metrics: new PromMetrics()` and expose `metrics.registry` yourself, or use
   the platform's registry. The gateway serves `/metrics` itself when `metrics.enabled` is set.
+- **Traces:** see [Tracing](#tracing) below.
 - **Usage:** the `x-sy-*` response headers and `usage.cost` / `usage.sy_cache` in response bodies
   carry per-request routing and cost (see the API reference in the [README](../README.md)).
+
+## Tracing
+
+`startServer` (and so `switchyard serve`) calls `startTracing(config, { logger })` and shuts it
+down after the drain. With `createGateway`, call it yourself, or bring your own SDK:
+
+```ts
+import { createGateway, loadConfig, createLogger, startTracing } from 'switchyard-gateway';
+
+const config = loadConfig('gateway.yaml');
+const logger = createLogger();
+const tracing = await startTracing(config, { logger }); // no-op unless observability.otel.enabled
+const gateway = createGateway({ config, logger });
+// at shutdown, after gateway.close():
+await tracing.shutdown(); // flushes pending spans
+```
+
+The gateway's code depends only on `@opentelemetry/api` (a regular dependency, `^1.9.0`). The
+SDK packages are optional dependencies and are imported only by `startTracing` when tracing is
+enabled ([ADR 0007](adr/0007-otel-sdk-packaging.md)). They need Node.js 22.15 or later. On older
+Node versions, or with `--no-optional`, `startTracing` logs an error and returns an inactive
+handle.
+
+**Embedder rule: an existing global provider wins.** If your application registers a global
+`TracerProvider` (for example with `@opentelemetry/sdk-node`) before `startServer` or
+`startTracing` runs, Switchyard keeps it. Gateway spans go to your provider, under your
+sampler, exporter and resource, and `observability.otel` export settings are ignored (a
+warning says so). Switchyard then also leaves your context manager, propagator, diag logger and
+error handler alone. To get gateway spans nested in your own traces:
+
+- Register your provider, context manager and propagators first. Without a context manager,
+  spans are not parented; without the W3C propagator, incoming `traceparent` is ignored and none
+  is sent upstream. `NodeSDK.start()` registers all three.
+- Keep one copy of `@opentelemetry/api` in the tree (`npm ls @opentelemetry/api`), at 1.9 or
+  later. A global registered by one API copy is only visible to copies of the same or an older
+  minor version. If the gateway resolves a newer minor than the copy that registered your
+  provider, it records nothing.
+- When you mount `gateway.app` behind your own HTTP instrumentation, the gateway's SERVER span
+  becomes a child of your server span.
+
+You do not need `observability.otel.enabled` for this. The flag only controls whether
+Switchyard starts its own SDK.
+
+**Custom adapters:** the attempt span is the active context while your adapter's `chat`,
+`chatStream`, `embed` or `rerank` runs (and while the router pulls the first stream chunk).
+To propagate it, add the headers in your adapter:
+
+```ts
+import { context, propagation } from '@opentelemetry/api';
+
+const headers: Record<string, string> = { authorization: `Bearer ${config.api_key}` };
+propagation.inject(context.active(), headers); // adds traceparent (+ tracestate, baggage)
+```
+
+The built-in adapters (OpenAI, Anthropic, OpenAI-compatible, the opencode bridge) already do
+this.
 
 ## Config hot reload
 
@@ -332,7 +389,8 @@ as follows. Every export has TSDoc, and CI enforces this with `pnpm check:api-do
   `hashKey`, `generateApiKey`.
 - **Platform:** `createPlatform`, `createDatabase`, `runMigrations`, `migrationsFolder`,
   `UsageWorker`, `AdminService`, `queryUsage`.
-- **Observability and cost:** `createLogger`, `PromMetrics`, `noopMetrics`, `computeCost`,
+- **Observability and cost:** `createLogger`, `PromMetrics`, `noopMetrics`, `startTracing`,
+  `TracingHandle`, `StartTracingOptions`, `TRACER_NAME`, `TRACE_ID_HEADER`, `computeCost`,
   `estimateCost`, `formatUsd`.
 
 The API follows semver from 1.0. Before that, minor versions (0.x) may contain breaking changes,

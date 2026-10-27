@@ -168,3 +168,9 @@ observability:
   log_level: '${LOG_LEVEL:-info}'
   log_bodies: false
   metrics: true
+  # Traces to Tempo in docker compose (SWITCHYARD_OTEL_ENABLED=true and OTEL_EXPORTER_OTLP_ENDPOINT
+  # come from the compose environment); off elsewhere (the kind env has no trace backend).
+  otel:
+    enabled: '${SWITCHYARD_OTEL_ENABLED:-false}'
+    service_name: switchyard
+    resource_attributes: { deployment.environment.name: compose }

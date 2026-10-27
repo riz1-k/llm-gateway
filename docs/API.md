@@ -27,6 +27,7 @@ Errors use the OpenAI envelope: `{"error":{"message","type","code","param"}}`.
 | `x-request-id`                                   | Propagated (generated if absent or unsafe); see the note below                                          |
 | `x-sy-user`, `x-sy-tags`                         | End-user attribution and comma-separated tags, stored in usage events (the body field `user` works too) |
 | `x-sy-cache: default \| bypass \| refresh`       | Cache control for this request. `refresh` skips the lookup but stores the new response                  |
+| `traceparent`, `tracestate`, `baggage`           | W3C trace context. With tracing on, the gateway joins the caller's trace and follows its sampling flag  |
 
 ## Response headers
 
@@ -40,11 +41,18 @@ Errors use the OpenAI envelope: `{"error":{"message","type","code","param"}}`.
 | `x-sy-fallbacks`, `x-sy-latency-ms`                         | Targets skipped or failed before success; gateway latency                                       |
 | `x-ratelimit-{limit,remaining,reset}-{requests,tokens}`     | The tightest rate-limit scope (key or team)                                                     |
 | `retry-after`, `retry-after-ms`                             | On 429 (gateway limits) and on 503 when the upstream is unavailable                             |
+| `x-sy-trace-id`                                             | Trace id of this request when tracing is on and the request is sampled (also on errors)         |
 
 A client-supplied `x-request-id` is echoed back unchanged and used in logs. Usage rows in
 Postgres store `<client-id>:req_<24 chars>` instead, because client ids are not guaranteed to be
 unique and the usage ledger is idempotent on `(ts, request_id)`. Search usage by prefix:
 `request_id LIKE '<client-id>:%'`.
+
+With tracing on (see [OBSERVABILITY.md § Tracing](OBSERVABILITY.md#tracing)), every upstream
+request carries a `traceparent` (naming the gateway's attempt span when the request is sampled),
+plus the caller's `tracestate` and `baggage`. A request with `traceparent: …-00` (not sampled) is not recorded and gets no
+`x-sy-trace-id`; its context is still forwarded upstream. With tracing off, trace headers are
+neither read nor forwarded.
 
 ## Cost in the response body: `usage.cost`
 

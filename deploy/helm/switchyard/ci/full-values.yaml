@@ -46,3 +46,10 @@ metrics:
     enabled: true
 env:
   NODE_OPTIONS: --enable-source-maps --max-old-space-size=256
+tracing:
+  enabled: true
+  endpoint: http://tempo.observability:4318
+  sampleRatio: 0.1
+  serviceName: switchyard
+  resourceAttributes:
+    deployment.environment.name: ci

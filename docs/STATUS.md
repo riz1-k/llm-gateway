@@ -1,7 +1,7 @@
 # Switchyard status
 
-_Last updated: 2026-10-27, after the release wave (M: npm package, release engineering,
-benchmarks, docs). The infra was built in wave K, the platform in wave H and the core in wave G._
+_Last updated: 2026-10-28, after wave 6 R1 (OpenTelemetry tracing). Before that: the release
+wave (M: npm package, release engineering, benchmarks, docs). The infra was built in wave K, the platform in wave H and the core in wave G._
 
 ## What exists
 
@@ -16,28 +16,29 @@ gateway uses:
 
 Without them, it falls back to the in-memory core implementations.
 
-| Area          | State                                                                                                                                                                                                                                                                                            | Where                                   |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------- |
-| Monorepo      | pnpm 11 workspace, TS 6 strict ESM, eslint flat (type-aware) + prettier, vitest 5, tsdown                                                                                                                                                                                                        | root                                    |
-| Config        | YAML + `${ENV}` / `${ENV:-default}` interpolation, zod schema, cross-reference checks with paths, pricing file, SIGHUP / `POST /admin/config/reload` hot reload (ref-counted snapshots)                                                                                                          | `packages/gateway/src/config/`          |
-| HTTP API      | `/v1/chat/completions` (JSON + SSE, `include_usage`), `/v1/embeddings` (+ `input_type` templates), `/v1/rerank`, `/v1/models`, `/healthz`, `/readyz` (`?probe=1`), `/admin/providers/health`, OpenAI error envelope, `x-sy-*` headers, request id, pino logs, body limit, graceful drain         | `src/app.ts`, `src/server.ts`           |
-| Pipeline      | auth → validate → route → defaults → estimate → RateLimiter → BudgetGuard → CacheStore → Router → account → UsageSink                                                                                                                                                                            | `src/core/pipeline.ts`                  |
-| Router        | fallback / weighted (smooth WRR) / least-latency (EWMA, ε-explore); retries with full jitter + Retry-After cap; per-attempt + route deadline; circuit breaker (pure `decide`/`record` + `MemoryBreakerStore`); per-provider FIFO semaphores; streaming fallback until the first meaningful chunk | `src/core/router.ts`, `src/resilience/` |
-| Providers     | `opencode` (full emulation + real `/event` streaming), `openai-compatible` (chat, embeddings, rerank), `openai`, `anthropic` (Messages translation incl. streaming tool use), `mock` (in-process)                                                                                                | `src/providers/`                        |
-| Mock provider | standalone deterministic OpenAI-compatible server with header/flag fault injection; bundled into the gateway package as `switchyard-gateway/mock-provider`                                                                                                                                       | `packages/mock-provider/`               |
-| CLI           | `serve`, `worker`, `migrate`, `validate-config`, `mock-provider`, admin: `teams`, `keys`, `budgets`, `usage`, `cache purge`, `seed-dev` (local mode via `--config`, remote via `--url` + admin token)                                                                                            | `src/cli.ts`, `src/cli/`                |
-| Database      | drizzle-orm schema + drizzle-kit migration (hand-edited: `usage_events` monthly range partitions, `sy_ensure_usage_partition()`), `switchyard migrate` with advisory lock                                                                                                                        | `src/db/`, `drizzle/`                   |
-| Keys & teams  | `PlatformKeyStore`: static → local cache → Redis (60 s, negative 10 s) → Postgres; pub/sub invalidation; batched `last_used_at`; `sk-sy-` + 40 base62 generator                                                                                                                                  | `src/auth/db-key-store.ts`              |
-| Rate limits   | `RedisRateLimiter`: sliding-window RPM/TPM × key/team in one Lua call (all-or-nothing), TPM reserve + reconcile, `x-ratelimit-*` / `retry-after(-ms)`                                                                                                                                            | `src/limits/`                           |
-| Budgets       | `RedisBudgetGuard` + `DbBudgetSource`: daily/monthly counters, pre-flight 402, soft/exceeded alerts (SET NX + webhook), reconciliation from `usage_daily`, linear projection                                                                                                                     | `src/limits/`, `src/usage/reconcile.ts` |
-| Cache         | `RedisCacheStore` (gzip ≥ 512 B, MGET/pipelined SET), per-item embedding cache, streaming replay, `RedisVectorIndex` semantic cache (Redis 8 vector sets)                                                                                                                                        | `src/cache/`                            |
-| Breakers      | `RedisBreakerStore`: CAS Lua over the pure state machine, per-target coalescing queue, 1 s local cache of closed state, local fallback                                                                                                                                                           | `src/resilience/redis-breaker.ts`       |
-| Usage         | `RedisStreamUsageSink` (XADD MAXLEN ~, memory buffer, drop metric) → `UsageWorker` (XREADGROUP, single-statement idempotent insert + rollup, XAUTOCLAIM, dead-letter, partitions/retention, budget reconcile)                                                                                    | `src/usage/`                            |
-| Admin API     | SPEC §12 under `/admin`: teams CRUD, keys create/list/revoke/rotate, budgets, budget status, usage reports, cache purge, audit log, redacted config; every mutation audit-logged in the same transaction                                                                                         | `src/admin/`                            |
-| Metrics       | `PromMetrics` (all SPEC §13 names + extras), `/metrics` on the API port or `metrics.port`; worker metrics on `--port`                                                                                                                                                                            | `src/observability/metrics.ts`          |
-| Dev tooling   | `Makefile`, `scripts/dev.sh`, `scripts/smoke_openai_sdk.py`, `.env.example`                                                                                                                                                                                                                      | root                                    |
-| Docs          | `README.md`, `docs/{CONFIG (generated),API,LIBRARY,ARCHITECTURE,RELEASING,ADMIN,METRICS,DEPLOYMENT,OBSERVABILITY}.md`, `docs/adr/` (6 ADRs), `docs/opencode-bridge.md`, `CONTRIBUTING.md`, `SECURITY.md`, this file                                                                              |                                         |
-| Release       | npm package `switchyard-gateway` (CLI `switchyard`, library, `./mock-provider`, `./config.schema.json`), Changesets + `release.yml` (npm trusted publishing, GitHub Packages, GitHub Release, GHCR), pack smoke, verdaccio e2e, k6 benchmarks                                                    | see [Release](#release-wave-m)          |
+| Area          | State                                                                                                                                                                                                                                                                                            | Where                                         |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------- |
+| Monorepo      | pnpm 11 workspace, TS 6 strict ESM, eslint flat (type-aware) + prettier, vitest 5, tsdown                                                                                                                                                                                                        | root                                          |
+| Config        | YAML + `${ENV}` / `${ENV:-default}` interpolation, zod schema, cross-reference checks with paths, pricing file, SIGHUP / `POST /admin/config/reload` hot reload (ref-counted snapshots)                                                                                                          | `packages/gateway/src/config/`                |
+| HTTP API      | `/v1/chat/completions` (JSON + SSE, `include_usage`), `/v1/embeddings` (+ `input_type` templates), `/v1/rerank`, `/v1/models`, `/healthz`, `/readyz` (`?probe=1`), `/admin/providers/health`, OpenAI error envelope, `x-sy-*` headers, request id, pino logs, body limit, graceful drain         | `src/app.ts`, `src/server.ts`                 |
+| Pipeline      | auth → validate → route → defaults → estimate → RateLimiter → BudgetGuard → CacheStore → Router → account → UsageSink                                                                                                                                                                            | `src/core/pipeline.ts`                        |
+| Router        | fallback / weighted (smooth WRR) / least-latency (EWMA, ε-explore); retries with full jitter + Retry-After cap; per-attempt + route deadline; circuit breaker (pure `decide`/`record` + `MemoryBreakerStore`); per-provider FIFO semaphores; streaming fallback until the first meaningful chunk | `src/core/router.ts`, `src/resilience/`       |
+| Providers     | `opencode` (full emulation + real `/event` streaming), `openai-compatible` (chat, embeddings, rerank), `openai`, `anthropic` (Messages translation incl. streaming tool use), `mock` (in-process)                                                                                                | `src/providers/`                              |
+| Mock provider | standalone deterministic OpenAI-compatible server with header/flag fault injection; bundled into the gateway package as `switchyard-gateway/mock-provider`                                                                                                                                       | `packages/mock-provider/`                     |
+| CLI           | `serve`, `worker`, `migrate`, `validate-config`, `mock-provider`, admin: `teams`, `keys`, `budgets`, `usage`, `cache purge`, `seed-dev` (local mode via `--config`, remote via `--url` + admin token)                                                                                            | `src/cli.ts`, `src/cli/`                      |
+| Database      | drizzle-orm schema + drizzle-kit migration (hand-edited: `usage_events` monthly range partitions, `sy_ensure_usage_partition()`), `switchyard migrate` with advisory lock                                                                                                                        | `src/db/`, `drizzle/`                         |
+| Keys & teams  | `PlatformKeyStore`: static → local cache → Redis (60 s, negative 10 s) → Postgres; pub/sub invalidation; batched `last_used_at`; `sk-sy-` + 40 base62 generator                                                                                                                                  | `src/auth/db-key-store.ts`                    |
+| Rate limits   | `RedisRateLimiter`: sliding-window RPM/TPM × key/team in one Lua call (all-or-nothing), TPM reserve + reconcile, `x-ratelimit-*` / `retry-after(-ms)`                                                                                                                                            | `src/limits/`                                 |
+| Budgets       | `RedisBudgetGuard` + `DbBudgetSource`: daily/monthly counters, pre-flight 402, soft/exceeded alerts (SET NX + webhook), reconciliation from `usage_daily`, linear projection                                                                                                                     | `src/limits/`, `src/usage/reconcile.ts`       |
+| Cache         | `RedisCacheStore` (gzip ≥ 512 B, MGET/pipelined SET), per-item embedding cache, streaming replay, `RedisVectorIndex` semantic cache (Redis 8 vector sets)                                                                                                                                        | `src/cache/`                                  |
+| Breakers      | `RedisBreakerStore`: CAS Lua over the pure state machine, per-target coalescing queue, 1 s local cache of closed state, local fallback                                                                                                                                                           | `src/resilience/redis-breaker.ts`             |
+| Usage         | `RedisStreamUsageSink` (XADD MAXLEN ~, memory buffer, drop metric) → `UsageWorker` (XREADGROUP, single-statement idempotent insert + rollup, XAUTOCLAIM, dead-letter, partitions/retention, budget reconcile)                                                                                    | `src/usage/`                                  |
+| Admin API     | SPEC §12 under `/admin`: teams CRUD, keys create/list/revoke/rotate, budgets, budget status, usage reports, cache purge, audit log, redacted config; every mutation audit-logged in the same transaction                                                                                         | `src/admin/`                                  |
+| Metrics       | `PromMetrics` (all SPEC §13 names + extras), `/metrics` on the API port or `metrics.port`; worker metrics on `--port`                                                                                                                                                                            | `src/observability/metrics.ts`                |
+| Tracing       | Opt-in OpenTelemetry: SERVER span per `/v1` request, `sy.limits` / `sy.cache.*` stage spans, CLIENT span per upstream attempt (GenAI semconv), W3C propagation in and out, `x-sy-trace-id`, `trace_id`/`span_id` in logs, OTLP/HTTP export, SDK lazily loaded (ADR 0007)                         | `src/observability/tracing.ts`, `otel-sdk.ts` |
+| Dev tooling   | `Makefile`, `scripts/dev.sh`, `scripts/smoke_openai_sdk.py`, `.env.example`                                                                                                                                                                                                                      | root                                          |
+| Docs          | `README.md`, `docs/{CONFIG (generated),API,LIBRARY,ARCHITECTURE,RELEASING,ADMIN,METRICS,DEPLOYMENT,OBSERVABILITY}.md`, `docs/adr/` (7 ADRs), `docs/opencode-bridge.md`, `CONTRIBUTING.md`, `SECURITY.md`, this file                                                                              |                                               |
+| Release       | npm package `switchyard-gateway` (CLI `switchyard`, library, `./mock-provider`, `./config.schema.json`), Changesets + `release.yml` (npm trusted publishing, GitHub Packages, GitHub Release, GHCR), pack smoke, verdaccio e2e, k6 benchmarks                                                    | see [Release](#release-wave-m)                |
 
 ## Release (wave M)
 
@@ -436,10 +437,98 @@ heavy-docker lock and torn down afterwards.
 - **`terraform.tfstate` for local-kind is local** (gitignored). It contains generated passwords
   while a cluster exists.
 
+## Wave 6 R1 — tracing
+
+Branch `feat/otel-tracing`, 2026-10-27/28. Closes the "No OpenTelemetry tracing" gap (SPEC §13).
+
+**What changed**
+
+- **Config:** `observability.otel` is a real schema: `enabled`, `endpoint`, `headers`,
+  `service_name`, `sample_ratio`, `resource_attributes`. Config values win; standard `OTEL_*`
+  variables fill unset keys; `OTEL_SDK_DISABLED=true` forces off. `config.schema.json` and
+  CONFIG.md regenerated; the three example configs updated.
+- **Core:** `src/observability/tracing.ts` (API only) and `src/observability/otel-sdk.ts`
+  (loaded with `import()` only when enabled; its own bundle chunk). SDK 3.0 packages are exact-pinned
+  optional dependencies, `@opentelemetry/api ^1.9.0` a dependency ([ADR 0007](adr/0007-otel-sdk-packaging.md)).
+  An existing global provider wins (embedder rule, LIBRARY.md). Spans flush after the drain on
+  SIGTERM.
+- **Spans:** see [OBSERVABILITY.md § Tracing](OBSERVABILITY.md#tracing). GenAI semconv from
+  semantic-conventions-genai `main@51a0f58` (2026-10-27, on semconv v1.44.0). One CLIENT span per
+  attempt is a documented deviation from the spec's "one span with all retries".
+- **Propagation:** every `upstreamFetch` user (openai, anthropic, openai-compatible) and the
+  opencode bridge inject `traceparent`/`tracestate`/`baggage`. The mock-provider server records
+  those three headers (`trace` in `/__mock/stats` `recent`).
+- **Clients:** `x-sy-trace-id` response header; `trace_id`/`span_id` on request log lines.
+- **Stacks:** Tempo 3.1.1 (digest-pinned, 24 h retention, 256 MB, OTLP/HTTP only) in both compose
+  files, a Grafana Tempo datasource with trace-to-metrics links, `observability/tempo/tempo.yaml`,
+  Helm `tracing.*` values (env-based), Makefile hints.
+- **Tests:** `test/integration/tracing.test.ts` (16, in-memory exporter, host-registered provider),
+  `tracing-sdk.test.ts` (4, real SDK against a fake OTLP collector), `tracing-disabled.test.ts`
+  (2, no SDK import, no spans, no header); one mock-provider test.
+
+**Live verification (2026-10-28, observe-host Tempo, gateway from this tree on :8788, mock on
+:8791).** Span trees from `GET /api/v2/traces/<id>` (abridged):
+
+```
+non-stream 8412ddb3…: POST /v1/chat/completions [SERVER] 45.6ms → sy.cache.exact (miss) 0.2ms
+                      → chat mock-echo [CLIENT] 24.7ms in=10 out=3 finish=stop cost=9.5e-06
+cache hit cb63a09d…:  POST /v1/chat/completions [SERVER] 2.7ms sy.cache=hit saved=9.5e-06
+                      → sy.cache.exact (hit) 0.1ms
+stream 05170346…:     POST … [SERVER] 12.5ms sy.ttft_ms=9 event sy.first_token → sy.cache.exact
+                      → chat mock-echo [CLIENT] 9.5ms time_to_first_chunk=0.006 in=11 out=4
+fallback f362420b…:   POST … [SERVER] 9.3ms route=demo-fallback
+                      → chat mock-echo [CLIENT ERROR] target=down error.type=upstream_unavailable 503
+                      → chat mock-echo [CLIENT] target=echo fallback.index=1 reason=upstream_unavailable
+traceparent 4bf92f35…: SERVER parent = caller span 00f067aa0ba902b7 → cache → CLIENT
+```
+
+The mock received `traceparent` with each attempt's span id (both fallback attempts matched
+Tempo's span ids) and `tracestate: docsqa=w7`. A span sent less than 1 s before SIGTERM reached
+Tempo (flush on shutdown).
+
+**Overhead** (cache-miss chat, constant 100 req/s × 12 s, 5 interleaved rounds, gateway pinned to
+CPU 2, loader and 0 ms mock on CPU 3, unique prompts; a throwaway Node loop because k6 is not
+installed here). `base` is the stable build d9db543 (pre-tracing, and older than this tree in other
+ways too). Medians, with the per-round range:
+
+| Mode                             | p50 ms           | p95 ms            | gateway CPU ms/req | errors |
+| -------------------------------- | ---------------- | ----------------- | ------------------ | ------ |
+| mock direct                      | 1.07 (1.03–1.20) | 2.3 (1.9–2.9)     | –                  | 0      |
+| base (d9db543)                   | 5.40 (5.11–6.46) | 62.5 (23.2–154.2) | 3.84 (3.52–5.26)   | 0      |
+| tracing off                      | 5.76 (5.51–6.53) | 55.3 (10.5–119.4) | 4.08 (3.87–4.80)   | 0      |
+| on, `sample_ratio: 1` (to Tempo) | 5.78 (5.50–6.54) | 23.3 (15.0–169.0) | 4.06 (3.93–5.40)   | 0      |
+| on, `sample_ratio: 0.01`         | 5.47 (5.43–6.25) | 32.2 (26.6–73.8)  | 3.92 (3.81–4.32)   | 4      |
+
+Read it as "no difference this machine can resolve". The ranges overlap on every column, and
+p95 swings 5–15× between rounds. Load average was 1.2–3.2 and CPU per request was about twice the
+RESULTS.md runs, so the laptop was busy (the bench/RESULTS.md caveats apply). The 4 errors were
+not reproducible in reruns with error logging (likely keep-alive resets in the loader). An earlier
+200 req/s run saturated the machine and is not used.
+
+**Images kept** for the wave-7 screenshot (observe-host pulls the last two too). Remove with:
+
+```bash
+docker rmi grafana/tempo:3.1.1@sha256:64e2fbd56d9c2b3412a4b430a58ea59e91a670b1e75f920a0c702213ad145044
+docker rmi grafana/grafana@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
+docker rmi prom/prometheus@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
+```
+
+**Not done (gaps):** `trace_id` on `usage_events` (needs a migration and admin API change);
+Prometheus exemplars (prom-client exemplars need the OpenMetrics content type, which changes
+`/metrics` for every scraper); worker tracing; the full compose stack was validated with
+`docker compose config` only, not started (it needs an image build); the image was not rebuilt
+(SDK presence measured with `pnpm deploy --prod`).
+
+**For wave 7 (cross-project traces):** DocsQA and OpsAgent export OTLP/HTTP to
+`127.0.0.1:4318` (observe-host) or `127.0.0.1:4319` (full stack) and send `traceparent` on their
+gateway calls (OpenAI SDK `default_headers`/per-request headers, or the OTel httpx
+instrumentation). The gateway joins their trace and follows their sampling decision.
+
 ## Known gaps
 
-- **No OpenTelemetry tracing** (SPEC §13 spans). Metrics and logs are done. `observability.otel`
-  and `log_bodies` are accepted but documented as reserved.
+- **`log_bodies` is reserved** (accepted, does nothing). Traces never carry content either.
+- **Tracing gaps (wave 6 R1):** no `trace_id` column on `usage_events` and no Prometheus
+  exemplars yet (see [Wave 6 R1 — tracing](#wave-6-r1--tracing)). The worker does not trace.
 - **Platform-on overhead is above the SPEC targets:** about 3.2–3.4 ms p50 on a miss and
   1.1–1.7 ms on a hit, against targets of 3 ms and 1 ms (bench/RESULTS.md). The cause is three
   sequential Redis round trips per request. The next steps (one combined limit-and-budget Lua

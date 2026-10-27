@@ -212,4 +212,9 @@ usage:
   retention_days: 400
   in_process_writer: true
 metrics: { enabled: true, path: /metrics }
-observability: { log_level: '${LOG_LEVEL:-info}', log_bodies: false, metrics: true }
+observability:
+  log_level: '${LOG_LEVEL:-info}'
+  log_bodies: false
+  metrics: true
+  # Set enabled: true to export traces to the observe-host Tempo (make observe-host-up).
+  otel: { enabled: false, endpoint: 'http://127.0.0.1:4318' }

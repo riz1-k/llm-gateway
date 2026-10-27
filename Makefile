@@ -79,11 +79,12 @@ image:              ## build the container image ($(IMAGE))
 	  --build-arg VERSION=$(VERSION) --build-arg REVISION=$(REVISION) \
 	  --build-arg CREATED=$$(date -u +%Y-%m-%dT%H:%M:%SZ) .
 
-compose-up: image   ## start the full stack (gateway :8797, Grafana :3301, Prometheus :9091)
+compose-up: image   ## start the full stack (gateway :8797, Grafana :3301, Prometheus :9091, Tempo :3201)
 	SWITCHYARD_IMAGE=$(IMAGE) $(COMPOSE) up -d --no-build --wait --wait-timeout 180
 	@echo "gateway    http://127.0.0.1:8797   (admin token: see deploy/docker/docker-compose.yml)"
 	@echo "grafana    http://127.0.0.1:3301   (admin / \$$GRAFANA_ADMIN_PASSWORD, default switchyard-local)"
 	@echo "prometheus http://127.0.0.1:9091"
+	@echo "tempo      http://127.0.0.1:$${TEMPO_PORT:-3201}   (OTLP/HTTP for other local services: http://127.0.0.1:$${TEMPO_OTLP_PORT:-4319})"
 
 compose-demo:       ## seed teams/budgets and send $(DEMO_SECONDS)s of demo traffic
 	SWITCHYARD_IMAGE=$(IMAGE) $(COMPOSE) --profile demo run --rm --no-deps seed
@@ -102,10 +103,11 @@ compose-ps:
 	$(COMPOSE) ps
 
 # ── observability ────────────────────────────────────────────────────────────────────────────
-observe-host-up:    ## Prometheus :9092 + Grafana :3302 for a gateway running on this host (Linux, host network)
+observe-host-up:    ## Prometheus :9092 + Grafana :3302 + Tempo :3200 (OTLP :4318) for a gateway on this host (Linux, host network)
 	$(OBSERVE_HOST) up -d --wait --wait-timeout 180
 	@echo "grafana    http://127.0.0.1:$${OBSERVE_GRAFANA_PORT:-3302}   (admin / \$$GRAFANA_ADMIN_PASSWORD, default switchyard-local)"
 	@echo "prometheus http://127.0.0.1:$${OBSERVE_PROMETHEUS_PORT:-9092}  (scrapes 127.0.0.1:8787/metrics)"
+	@echo "tempo      http://127.0.0.1:$${OBSERVE_TEMPO_PORT:-3200}  (OTLP/HTTP: http://127.0.0.1:$${OBSERVE_OTLP_PORT:-4318})"
 
 observe-host-down:  ## stop the host-mode observability stack and delete its volumes
 	$(OBSERVE_HOST) down -v --remove-orphans

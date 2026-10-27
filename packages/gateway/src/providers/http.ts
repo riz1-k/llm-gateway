@@ -1,4 +1,5 @@
 import { ProviderError, parseRetryAfter, providerErrorFromStatus } from '../core/errors.js';
+import { injectTraceHeaders } from '../observability/tracing.js';
 import { ClientAbortError, DeadlineExceededError } from '../util/abort.js';
 import { parseSSE, type SSEEvent } from '../util/sse.js';
 
@@ -74,17 +75,20 @@ export function extractUpstreamMessage(text: string): string {
   return text.length > 500 ? `${text.slice(0, 500)}…` : text || '(empty body)';
 }
 
-/** Performs a request and throws a classified ProviderError for non-2xx responses. */
+/**
+ * Performs a request and throws a classified ProviderError for non-2xx responses. The active trace
+ * context (the attempt span) is injected as `traceparent`/`tracestate`/`baggage`.
+ */
 export async function upstreamFetch(req: UpstreamRequest): Promise<Response> {
   const f = req.fetch ?? fetch;
   let res: Response;
   try {
     res = await f(req.url, {
       method: req.method ?? (req.body === undefined ? 'GET' : 'POST'),
-      headers: {
+      headers: injectTraceHeaders({
         ...(req.body === undefined ? {} : { 'content-type': 'application/json' }),
         ...req.headers,
-      },
+      }),
       body: req.body === undefined ? null : JSON.stringify(req.body),
       signal: req.signal,
     });
