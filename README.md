@@ -1,10 +1,6 @@
 # Switchyard
 
-[![CI](https://github.com/riz1-k/llm-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/riz1-k/llm-gateway/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/switchyard-gateway)](https://www.npmjs.com/package/switchyard-gateway)
-[![image](https://img.shields.io/badge/ghcr.io-riz1--k%2Fswitchyard-blue)](https://github.com/riz1-k/llm-gateway/pkgs/container/switchyard)
-[![node](https://img.shields.io/node/v/switchyard-gateway)](packages/gateway/package.json)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![CI](https://github.com/riz1-k/llm-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/riz1-k/llm-gateway/actions/workflows/ci.yml) [![Docker image](https://github.com/riz1-k/llm-gateway/actions/workflows/docker.yml/badge.svg)](https://github.com/riz1-k/llm-gateway/pkgs/container/switchyard) [![CodeQL](https://github.com/riz1-k/llm-gateway/actions/workflows/codeql.yml/badge.svg)](https://github.com/riz1-k/llm-gateway/actions/workflows/codeql.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/riz1-k/llm-gateway/badge)](https://scorecard.dev/viewer/?uri=github.com/riz1-k/llm-gateway) [![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 **An OpenAI-compatible LLM gateway in TypeScript: one endpoint for every model, with fallback,
 caching, rate limits, budgets and per-team cost tracking. It also makes backends that can't do
@@ -105,6 +101,15 @@ docker run --rm -p 8787:8787 -e OPENAI_API_KEY \
 ```
 
 `:edge` tracks `main`; versioned tags (`:0.1.0`, `:0.1`, `:latest`) are published by the release workflow.
+
+Images are signed with cosign (keyless) and carry SBOM and build-provenance attestations. Verify
+before you deploy ([details](docs/DEPLOYMENT.md#verifying-the-image)):
+
+```bash
+cosign verify ghcr.io/riz1-k/switchyard:edge \
+  --certificate-identity-regexp '^https://github.com/riz1-k/llm-gateway/\.github/workflows/docker\.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
 
 The full local stack (gateway, worker, Redis, Postgres, Prometheus, Grafana and the mock) starts
 with `make compose-up && make compose-demo`. Grafana is then on `:3301`.
@@ -286,12 +291,12 @@ real DocsQA, OpsAgent and eval traffic (2026-10-27):
 
 ## Deployment
 
-| Target         | How                                                                                                                                  |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| Single process | `switchyard serve` (`usage.in_process_writer: true` when using Postgres)                                                             |
-| Docker         | `ghcr.io/riz1-k/switchyard`: distroless, non-root, multi-arch, about 65 MB compressed; one image for `serve`, `worker` and `migrate` |
-| Compose        | `deploy/docker/docker-compose.yml`: the full stack with dashboards                                                                   |
-| Kubernetes     | `deploy/helm/switchyard`, plus Terraform modules and a kind environment in `deploy/terraform`                                        |
+| Target         | How                                                                                                                                                 |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Single process | `switchyard serve` (`usage.in_process_writer: true` when using Postgres)                                                                            |
+| Docker         | `ghcr.io/riz1-k/switchyard`: distroless, non-root, multi-arch, about 65 MB compressed, cosign-signed; one image for `serve`, `worker` and `migrate` |
+| Compose        | `deploy/docker/docker-compose.yml`: the full stack with dashboards                                                                                  |
+| Kubernetes     | `deploy/helm/switchyard`, plus Terraform modules and a kind environment in `deploy/terraform`                                                       |
 
 Details in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Production hardening is in
 [SECURITY.md](SECURITY.md).

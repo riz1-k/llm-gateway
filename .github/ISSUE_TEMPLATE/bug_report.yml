@@ -14,13 +14,21 @@ body:
     validations:
       required: true
   - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: |
+        Minimal `gateway.yaml` that shows the problem (redact keys and secrets). Configs that use
+        the `mock` provider are easiest for us to run.
+      render: yaml
+    validations:
+      required: true
+  - type: textarea
     id: repro
     attributes:
-      label: Reproduction
-      description: |
-        Minimal config (redact secrets) and the request, e.g. a curl command. Configs that use the
-        `mock` provider are easiest for us to run.
-      render: yaml
+      label: Steps to reproduce
+      description: The request(s) you sent, e.g. a curl command or SDK snippet, and any other steps.
+      render: shell
     validations:
       required: true
   - type: textarea

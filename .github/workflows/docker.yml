@@ -1,5 +1,7 @@
 name: Docker image
 
+# Every run pushes and then signs (cosign keyless), so there is deliberately no pull_request
+# trigger: PRs build the image without pushing in ci.yml's `image` job.
 on:
   push:
     branches: [main]
@@ -31,10 +33,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
+      contents: read # checkout
+      packages: write # push to ghcr.io
+      id-token: write # GitHub OIDC token for keyless cosign signing and the provenance attestation
+      attestations: write # store the build-provenance attestation
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,3 +81,25 @@ jobs:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+      # Keyless signing: Fulcio issues a short-lived certificate for this job's GitHub OIDC identity
+      # and the signature is logged in Rekor. Signing the index digest covers every tag and platform.
+      # The certificate identity (SAN) is the workflow file that signs, which is this file in both
+      # entry points (direct run, or called by release.yml):
+      #   https://github.com/<owner>/<repo>/.github/workflows/docker.yml@<ref>
+      # When release.yml calls this file, the certificate's workflow name is the caller's ("Release").
+      # Verification commands: docs/DEPLOYMENT.md#verifying-the-image.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.4
+      - name: Sign the image (cosign keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+      - name: Verify the signature with the documented identity
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign verify "${IMAGE}@${DIGEST}" \
+            --certificate-identity-regexp "^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/docker\.yml@" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            > /dev/null

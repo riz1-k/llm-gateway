@@ -60,7 +60,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write # version commit on the changeset-release/main branch
-      pull-requests: write
+      pull-requests: write # open or update the Version Packages PR
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -161,8 +161,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
-      contents: read
-      packages: write
+      contents: read # checkout
+      packages: write # npm publish to GitHub Packages
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -180,7 +180,8 @@ jobs:
         working-directory: packages/gateway
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
+        # GitHub Packages has no trusted publishing (OIDC); the job-scoped GITHUB_TOKEN is the only option.
+        run: | # zizmor: ignore[use-trusted-publishing] GitHub Packages only accepts GITHUB_TOKEN
           # GitHub Packages only accepts names scoped to the repository owner.
           npm pkg set name=@riz1-k/switchyard-gateway
           pnpm pack --pack-destination "$RUNNER_TEMP"
@@ -193,10 +194,13 @@ jobs:
     needs: publish
     if: needs.publish.outputs.published == 'true'
     permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
-    uses: ./.github/workflows/docker.yml
+      contents: read # checkout
+      packages: write # push to ghcr.io
+      id-token: write # keyless cosign signing + provenance attestation (OIDC)
+      attestations: write # store the build-provenance attestation
+    # Same-commit reusable workflow. The `$/` self-repository form is not used yet: actionlint
+    # does not parse it, and a job-level `./` call is resolved from the caller's commit (not the
+    # runner's filesystem), so the runtime-checkout risk zizmor warns about does not apply here.
+    uses: ./.github/workflows/docker.yml # zizmor: ignore[self-repository] see the comment above
     with:
       version: ${{ fromJSON(needs.publish.outputs.packages)[0].version }}

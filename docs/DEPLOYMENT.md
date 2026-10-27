@@ -38,13 +38,70 @@ docker run --rm switchyard:dev validate-config /etc/switchyard/gateway.yaml   # 
 | Filesystem                  | Works with a read-only root filesystem. It only needs a writable `/tmp` for `seed-dev --output`. |
 
 Images are published to `ghcr.io/riz1-k/switchyard` for linux/amd64 and linux/arm64, with SBOM
-and provenance attestations (`.github/workflows/docker.yml`):
+and provenance attestations, and signed with cosign (`.github/workflows/docker.yml`):
 
 - **Every release:** `<version>`, `<major>.<minor>` and `latest`. The release workflow calls the
   Docker workflow after the npm publish (see [RELEASING.md](RELEASING.md)).
 - **`main`:** `edge` and `sha-<short>`.
 
 Pin a version tag, or a digest, in production.
+
+### Verifying the image
+
+Every pushed image is signed by digest with [Sigstore](https://www.sigstore.dev) keyless signing:
+the workflow's GitHub OIDC token gets a short-lived Fulcio certificate, and the signature is
+recorded in the Rekor transparency log. There is no long-lived key. The certificate identity is
+the workflow file that signs, which is `docker.yml` in both entry points:
+
+| Image                                         | Built by                                                     | Certificate identity (SAN)                                                           | Workflow name in the certificate |
+| --------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------ | -------------------------------- |
+| `edge`, `sha-<short>`                         | `docker.yml` on push to `main`                               | `https://github.com/riz1-k/llm-gateway/.github/workflows/docker.yml@refs/heads/main` | `Docker image`                   |
+| `<version>`, `<major>.<minor>`, `latest`      | `release.yml` → `docker.yml` (reusable workflow)             | `https://github.com/riz1-k/llm-gateway/.github/workflows/docker.yml@refs/heads/main` | `Release`                        |
+| `sha-<short>` from a manual run or a `v*` tag | `docker.yml` (`workflow_dispatch`, or a pushed `v*.*.*` tag) | `…/docker.yml@refs/heads/<branch>` or `…/docker.yml@refs/tags/<tag>`                 | `Docker image`                   |
+
+A reusable workflow signs with its own identity, so release images carry `docker.yml`, not
+`release.yml`. The calling workflow is still recorded in the certificate: its name (shown above)
+and its path, in the Build Config URI
+(`https://github.com/riz1-k/llm-gateway/.github/workflows/release.yml@refs/heads/main`).
+
+Install [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) v3 (CI signs with
+v3.1.4) and verify any image built by this repository:
+
+```bash
+cosign verify ghcr.io/riz1-k/switchyard:edge \
+  --certificate-identity-regexp '^https://github.com/riz1-k/llm-gateway/\.github/workflows/docker\.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Stricter, for a release image: pin the exact identity (built from `main`) and require that the
+release workflow made the call:
+
+```bash
+cosign verify ghcr.io/riz1-k/switchyard:0.1.0 \
+  --certificate-identity https://github.com/riz1-k/llm-gateway/.github/workflows/docker.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-github-workflow-name Release
+```
+
+For `edge`, use the same exact identity with `--certificate-github-workflow-name 'Docker image'`.
+Verify a digest (`ghcr.io/riz1-k/switchyard@sha256:…`) rather than a tag when you pin one.
+
+The build-provenance attestation (SLSA v1, from `actions/attest-build-provenance`) is verified with
+the GitHub CLI. The signer is `docker.yml` for both entry points, so the same command works for
+`edge` and release tags:
+
+```bash
+gh attestation verify oci://ghcr.io/riz1-k/switchyard:edge \
+  --repo riz1-k/llm-gateway \
+  --signer-workflow riz1-k/llm-gateway/.github/workflows/docker.yml \
+  --source-ref refs/heads/main
+```
+
+The BuildKit SBOM and provenance are attached to the image index:
+`docker buildx imagetools inspect ghcr.io/riz1-k/switchyard:edge --format '{{ json .SBOM }}'`.
+
+To enforce signatures in a cluster, use a Sigstore admission controller (the policy-controller,
+or Kyverno `verifyImages`) with the identity and issuer above.
 
 ## Configuration and secrets
 
