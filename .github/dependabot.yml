@@ -55,6 +55,11 @@ updates:
     commit-message:
       prefix: build(deps)
     labels: [dependencies, docker]
+    # The image's Node major follows .nvmrc and the CI test matrix (Node 22/24); a new major is a deliberate
+    # change made together with them, not a Dependabot bump.
+    ignore:
+      - dependency-name: node
+        update-types: [version-update:semver-major]
     groups:
       docker-images:
         patterns: ['*']
@@ -71,6 +76,13 @@ updates:
     commit-message:
       prefix: build(deps)
     labels: [dependencies, docker]
+    # Postgres and Redis majors change the on-disk format or semantics (Redis 8 vector sets back the semantic
+    # cache); upgrade them by hand.
+    ignore:
+      - dependency-name: postgres
+        update-types: [version-update:semver-major]
+      - dependency-name: redis
+        update-types: [version-update:semver-major]
     groups:
       compose-images:
         patterns: ['*']
