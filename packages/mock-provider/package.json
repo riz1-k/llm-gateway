@@ -1,0 +1,21 @@
+{
+  "name": "@switchyard/mock-provider",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deterministic, fault-injectable fake OpenAI / Anthropic / rerank server used by Switchyard tests and demos. Bundled into switchyard-gateway (`switchyard mock-provider`).",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit -p tsconfig.json",
+    "start": "tsx src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.5",
+    "hono": "4.13.14"
+  }
+}
