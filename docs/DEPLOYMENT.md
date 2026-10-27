@@ -68,19 +68,20 @@ API. Validate any config with `switchyard validate-config <file>`.
 ## Docker Compose
 
 `deploy/docker/docker-compose.yml` (project name `switchyard`) is a local, loopback-only stack.
-Each service has a memory limit, so the whole stack fits in about 2.2 GB:
+Each service has a memory limit, so the whole stack fits in about 2.5 GB:
 
-| Service         | Image                     | Host port         | Limit  | Notes                                                                                                                    |
-| --------------- | ------------------------- | ----------------- | ------ | ------------------------------------------------------------------------------------------------------------------------ |
-| `gateway`       | `switchyard:dev`          | `127.0.0.1:8797`  | 384 MB | `serve`. Healthcheck on `/readyz`. Metrics on :9464 (container network only).                                            |
-| `worker`        | `switchyard:dev`          | none              | 192 MB | `worker --port 9465`                                                                                                     |
-| `migrate`       | `switchyard:dev`          | none              | none   | One-shot. `gateway` and `worker` wait for `service_completed_successfully`.                                              |
-| `mock-provider` | `switchyard:dev`          | none              | 128 MB | `mock-provider --port 8790`                                                                                              |
-| `postgres`      | `postgres:18.6-alpine`    | `127.0.0.1:55432` | 256 MB | DB `llmgateway`. An init script creates the read-only `grafana_reader` role.                                             |
-| `redis`         | `redis:8.8.4-alpine`      | `127.0.0.1:56379` | 256 MB | AOF, `maxmemory 192mb`, `noeviction`                                                                                     |
-| `prometheus`    | `prom/prometheus:v3.15.1` | `127.0.0.1:9091`  | 384 MB | Scrapes gateway and worker, loads `observability/prometheus/alerts.yml`                                                  |
-| `grafana`       | `grafana/grafana:13.2.4`  | `127.0.0.1:3301`  | 512 MB | Provisioned datasources and the three dashboards                                                                         |
-| `seed`          | `switchyard:dev`          | none              | none   | Profile `demo`: `seed-dev` creates the docsqa/opsagent/evals teams and writes keys only to a 0600 file in the container. |
+| Service         | Image                     | Host port                          | Limit  | Notes                                                                                                                                                  |
+| --------------- | ------------------------- | ---------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `gateway`       | `switchyard:dev`          | `127.0.0.1:8797`                   | 384 MB | `serve`. Healthcheck on `/readyz`. Metrics on :9464 (container network only).                                                                          |
+| `worker`        | `switchyard:dev`          | none                               | 192 MB | `worker --port 9465`                                                                                                                                   |
+| `migrate`       | `switchyard:dev`          | none                               | none   | One-shot. `gateway` and `worker` wait for `service_completed_successfully`.                                                                            |
+| `mock-provider` | `switchyard:dev`          | none                               | 128 MB | `mock-provider --port 8790`                                                                                                                            |
+| `postgres`      | `postgres:18.6-alpine`    | `127.0.0.1:55432`                  | 256 MB | DB `llmgateway`. An init script creates the read-only `grafana_reader` role.                                                                           |
+| `redis`         | `redis:8.8.4-alpine`      | `127.0.0.1:56379`                  | 256 MB | AOF, `maxmemory 192mb`, `noeviction`                                                                                                                   |
+| `prometheus`    | `prom/prometheus:v3.15.1` | `127.0.0.1:9091`                   | 384 MB | Scrapes gateway and worker, loads `observability/prometheus/alerts.yml`                                                                                |
+| `tempo`         | `grafana/tempo:3.1.1`     | `127.0.0.1:3201`, `127.0.0.1:4319` | 256 MB | Traces: Tempo API, and OTLP/HTTP for other local services. 24 h retention. The gateway exports to it (`SWITCHYARD_OTEL_ENABLED=false` turns that off). |
+| `grafana`       | `grafana/grafana:13.2.4`  | `127.0.0.1:3301`                   | 512 MB | Provisioned datasources (Prometheus, Postgres, Tempo) and the three dashboards                                                                         |
+| `seed`          | `switchyard:dev`          | none                               | none   | Profile `demo`: `seed-dev` creates the docsqa/opsagent/evals teams and writes keys only to a 0600 file in the container.                               |
 
 The host ports deliberately avoid the usual ones (5432, 6379, 8787, 9090, 3000), so the stack can
 run next to native services.

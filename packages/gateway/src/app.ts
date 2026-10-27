@@ -17,8 +17,15 @@ import { parseChatRequest, parseEmbeddingRequest, parseRerankRequest } from './h
 import { initTokenizer } from './limits/estimate.js';
 import { NoopBudgetGuard } from './limits/budgets.js';
 import { NoopRateLimiter } from './limits/ratelimit.js';
+import { context } from '@opentelemetry/api';
 import { createLogger, type Logger } from './observability/logger.js';
 import { noopMetrics, PromMetrics, type GatewayMetrics } from './observability/metrics.js';
+import {
+  recordResponse,
+  startRequestSpan,
+  TRACE_ID_HEADER,
+  type RequestSpan,
+} from './observability/tracing.js';
 import type { Platform } from './platform/index.js';
 import type { FetchLike } from './providers/http.js';
 import { ProviderRegistry, type AdapterFactory } from './providers/registry.js';
@@ -56,6 +63,8 @@ type Env = {
     startedAt: number;
     logger: Logger;
     key: ApiKeyRecord;
+    /** Server span of a /v1 request (undefined elsewhere). */
+    trace: RequestSpan | undefined;
   };
 };
 
@@ -211,7 +220,7 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
 
   const app = new Hono<Env>();
 
-  // --- request context: id, logger, timing, in-flight tracking --------------------------------
+  // --- request context: id, logger, timing, in-flight tracking, server span ------------------
   app.use('*', async (c, next) => {
     const clientId = c.req.header('x-request-id');
     const requestId = resolveRequestId(clientId);
@@ -222,22 +231,50 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
     // client's id as a searchable prefix.
     c.set('usageId', requestId === clientId ? `${requestId}:${newRequestId()}` : requestId);
     c.set('startedAt', opts.clock?.() ?? Date.now());
-    c.set('logger', logger.child({ requestId }));
+    // Only the OpenAI-compatible API is traced; health, metrics and admin routes are not.
+    const path = c.req.path;
+    const span = path.startsWith('/v1/') ? startRequestSpan(c.req.raw, path) : undefined;
+    const ids = span?.ids;
+    c.set('trace', span);
+    c.set('logger', logger.child(ids ? { requestId, ...ids } : { requestId }));
     inflight++;
     let streaming = false;
+    const done = (): void => {
+      if (!span) return;
+      const err = c.error;
+      recordResponse(
+        span,
+        c.req.method,
+        path,
+        c.res.status,
+        err instanceof GatewayError
+          ? { code: err.code, err }
+          : err
+            ? { code: 'internal_error', err }
+            : undefined,
+      );
+      span.end();
+    };
     try {
-      await next();
+      await (span ? context.with(span.context, next) : next());
       c.res.headers.set('x-request-id', requestId);
+      if (ids) c.res.headers.set(TRACE_ID_HEADER, ids.trace_id);
       streaming = c.res.headers.get('content-type')?.startsWith('text/event-stream') ?? false;
       if (streaming && c.res.body) {
         const res = c.res;
         c.res = new Response(
-          withFinally(res.body!, () => inflight--),
+          withFinally(res.body!, () => {
+            inflight--;
+            done();
+          }),
           { status: res.status, headers: res.headers },
         );
       }
     } finally {
-      if (!streaming) inflight--;
+      if (!streaming) {
+        inflight--;
+        done();
+      }
     }
   });
 
@@ -377,6 +414,7 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
     const key = await services.keys.verify(token);
     if (!key) throw new GatewayError(401, 'invalid_api_key', 'Incorrect API key provided.');
     c.set('key', key);
+    c.get('trace')?.setAttributes({ 'sy.team': key.team.slug, 'sy.key_prefix': key.prefix });
     await next();
   });
   v1.use('*', limitBody);
@@ -406,6 +444,7 @@ export function createGateway(opts: CreateGatewayOptions): Gateway {
       endUser: clip(c.req.header('x-sy-user'), MAX_END_USER_LENGTH),
       tags,
       cacheMode: parseCacheMode(c.req.header('x-sy-cache')),
+      trace: c.get('trace'),
     };
   };
 

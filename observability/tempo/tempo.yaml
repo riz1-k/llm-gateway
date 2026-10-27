@@ -1,0 +1,47 @@
+# Grafana Tempo (single binary, local storage) for the local stacks: docker-compose.yml (bridge
+# network) and docker-compose.observe-host.yml (host network). Receives OTLP/HTTP only and keeps
+# traces for 24 h. Listen addresses come from the environment (`-config.expand-env=true`):
+#   TEMPO_LISTEN_ADDR   0.0.0.0 in the full stack, 127.0.0.1 in host-network mode
+#   TEMPO_HTTP_PORT     Tempo API / Grafana datasource (default 3200)
+#   TEMPO_GRPC_PORT     internal gRPC (default 9095)
+#   TEMPO_OTLP_PORT     OTLP/HTTP receiver (default 4318)
+stream_over_http_enabled: true
+
+server:
+  http_listen_address: ${TEMPO_LISTEN_ADDR:-0.0.0.0}
+  http_listen_port: ${TEMPO_HTTP_PORT:-3200}
+  grpc_listen_address: ${TEMPO_LISTEN_ADDR:-0.0.0.0}
+  grpc_listen_port: ${TEMPO_GRPC_PORT:-9095}
+  log_level: warn
+
+memory:
+  # Derive GOMEMLIMIT from the container memory limit.
+  automemlimit_enabled: true
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: ${TEMPO_LISTEN_ADDR:-0.0.0.0}:${TEMPO_OTLP_PORT:-4318}
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+# Small local retention: blocks older than 24 h are deleted.
+backend_scheduler:
+  provider:
+    compaction:
+      compaction:
+        block_retention: 24h
+backend_worker:
+  compaction:
+    block_retention: 24h
+
+usage_report:
+  reporting_enabled: false

@@ -102,6 +102,33 @@
         "type": ["string", "number", "boolean"]
       }
     },
+    "tracing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "endpoint": {
+          "type": "string",
+          "pattern": "^(https?://.+)?$"
+        },
+        "sampleRatio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "serviceName": {
+          "type": "string"
+        },
+        "resourceAttributes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "serviceAccount": {
       "type": "object",
       "additionalProperties": false,

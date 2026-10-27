@@ -34,27 +34,29 @@ flowchart LR
   WORKER -->|"usage_events · usage_daily"| PG
   WORKER -->|"budget reconciliation"| REDIS
   GW -->|"/metrics"| PROM[(Prometheus)] --> GRAF[Grafana]
+  GW -.->|"OTLP/HTTP traces (optional)"| TEMPO[(Tempo / any OTLP backend)] --> GRAF
 ```
 
-| Layer         | Code                                                                                      | Responsibility                                                                     |
-| ------------- | ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| HTTP          | `app.ts`, `http/validation.ts`, `admin/routes.ts`                                         | Hono routes, request ids, auth, zod validation, SSE, admin API, health and metrics |
-| Config        | `config/*`                                                                                | YAML → `${ENV}` interpolation → zod → `ResolvedConfig` (immutable snapshot)        |
-| Pipeline      | `core/pipeline.ts`                                                                        | Per-request policy: route, estimate, limits, budget, cache, dispatch, accounting   |
-| Routing       | `core/router.ts`, `core/strategies.ts`, `resilience/*`                                    | Target order, breakers, concurrency slots, retries, timeouts, streaming commit     |
-| Providers     | `providers/*`                                                                             | Translate canonical (OpenAI-shaped) requests to each upstream and back             |
-| Services      | `core/services.ts` + implementations                                                      | Interfaces for keys, limits, budgets, cache, usage, breakers (memory or Redis/PG)  |
-| Platform      | `platform/*`, `auth/db-key-store.ts`, `limits/redis-*`, `cache/redis-cache.ts`, `usage/*` | Redis/Postgres implementations, invalidation bus, usage worker                     |
-| Observability | `observability/*`                                                                         | pino logger, Prometheus metrics                                                    |
-| CLI           | `cli.ts`, `cli/*`                                                                         | `init`, `serve`, `worker`, `migrate`, admin commands, `mock-provider`              |
+| Layer         | Code                                                                                      | Responsibility                                                                       |
+| ------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| HTTP          | `app.ts`, `http/validation.ts`, `admin/routes.ts`                                         | Hono routes, request ids, auth, zod validation, SSE, admin API, health and metrics   |
+| Config        | `config/*`                                                                                | YAML → `${ENV}` interpolation → zod → `ResolvedConfig` (immutable snapshot)          |
+| Pipeline      | `core/pipeline.ts`                                                                        | Per-request policy: route, estimate, limits, budget, cache, dispatch, accounting     |
+| Routing       | `core/router.ts`, `core/strategies.ts`, `resilience/*`                                    | Target order, breakers, concurrency slots, retries, timeouts, streaming commit       |
+| Providers     | `providers/*`                                                                             | Translate canonical (OpenAI-shaped) requests to each upstream and back               |
+| Services      | `core/services.ts` + implementations                                                      | Interfaces for keys, limits, budgets, cache, usage, breakers (memory or Redis/PG)    |
+| Platform      | `platform/*`, `auth/db-key-store.ts`, `limits/redis-*`, `cache/redis-cache.ts`, `usage/*` | Redis/Postgres implementations, invalidation bus, usage worker                       |
+| Observability | `observability/*`                                                                         | pino logger, Prometheus metrics, OpenTelemetry tracing (`tracing.ts`, `otel-sdk.ts`) |
+| CLI           | `cli.ts`, `cli/*`                                                                         | `init`, `serve`, `worker`, `migrate`, admin commands, `mock-provider`                |
 
 ## Request lifecycle
 
 The path for `POST /v1/chat/completions`, in order. Embeddings and rerank follow the same shape
 without streaming. Embeddings cache per input item.
 
-1. **Request id:** a safe client `x-request-id` is kept, otherwise one is generated. A child
-   logger is created with the id.
+1. **Request id and trace:** a safe client `x-request-id` is kept, otherwise one is generated.
+   For `/v1/*`, with tracing on, the SERVER span starts here from the caller's `traceparent`. A
+   child logger is created with the id (and `trace_id`/`span_id` when the span is recording).
 2. **Auth:** Bearer or `x-api-key` → `KeyStore.verify`. Static keys are checked first. Database
    keys must be well formed (`sk-sy-` plus 40 base62 characters). They are looked up by SHA-256
    in a per-process cache (5 s), then in Redis (60 s), then in Postgres. Revocations are pushed
@@ -89,6 +91,14 @@ without streaming. Embeddings cache per input item.
     `stream_options.include_usage` is set.
 
 Client disconnects abort the upstream request through the request's `AbortSignal`.
+
+With tracing on, steps 6–7 share one `sy.limits` span, step 8 gets `sy.cache.exact` and
+`sy.cache.semantic` spans, and each attempt in step 9 is its own CLIENT span whose context is
+injected as `traceparent` into the upstream request. Step 10 writes usage and cost onto the
+spans. The core imports only `@opentelemetry/api`; `observability/tracing.ts` wraps it, and the
+SDK bootstrap in `observability/otel-sdk.ts` is loaded with a dynamic `import()` only when
+`observability.otel.enabled` is true ([ADR 0007](adr/0007-otel-sdk-packaging.md)). The span model
+is in [OBSERVABILITY.md § Tracing](OBSERVABILITY.md#tracing).
 
 ## Streaming
 

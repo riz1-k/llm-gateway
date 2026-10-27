@@ -49,6 +49,9 @@ npx switchyard-gateway init && npx switchyard-gateway serve   # offline demo, no
   partitioned Postgres tables with daily rollups.
 - **Operations:**
   - Prometheus metrics, Grafana dashboards and alert rules with runbooks;
+  - opt-in OpenTelemetry traces: a span per request and per upstream attempt (GenAI semconv),
+    W3C `traceparent` in and out, Tempo in the compose stacks
+    ([docs/OBSERVABILITY.md § Tracing](docs/OBSERVABILITY.md#tracing));
   - `/healthz` and `/readyz`;
   - hot config reload and graceful shutdown;
   - a distroless image, a Helm chart and Terraform for kind.
@@ -372,7 +375,6 @@ docs, and corrections are welcome.
 
 ## Roadmap
 
-- OpenTelemetry traces (`gen_ai.*` conventions). The config keys exist and are marked reserved.
 - Atomic budget reservations, to remove the concurrent-overshoot bound (SR-14), and per-key
   concurrency limits.
 - Scoped admin tokens and RBAC, with per-token audit attribution.
@@ -393,7 +395,7 @@ Known gaps are tracked in [docs/STATUS.md](docs/STATUS.md#known-gaps).
 | [docs/adr/](docs/adr/README.md)                    | Architecture decision records                                  |
 | [docs/ADMIN.md](docs/ADMIN.md)                     | Teams, keys, limits, budgets, cache, usage pipeline, admin API |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)           | Image, Compose, Helm, Terraform, sizing, upgrades              |
-| [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)     | Dashboards, alerts, runbooks                                   |
+| [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)     | Dashboards, tracing, alerts, runbooks                          |
 | [docs/METRICS.md](docs/METRICS.md)                 | Metric reference and queries                                   |
 | [docs/opencode-bridge.md](docs/opencode-bridge.md) | The Copilot bridge and its emulation protocols                 |
 | [docs/RELEASING.md](docs/RELEASING.md)             | Release process and one-time setup                             |

@@ -85,6 +85,12 @@ pricing file pointed at the shipped/default table unless the config sets its own
 {{- $metrics := mustMergeOverwrite (dict "enabled" true "path" "/metrics") ($cfg.metrics | default dict) (dict "port" .Values.api.metricsPort) -}}
 {{- $_ := set $cfg "server" $server -}}
 {{- $_ := set $cfg "metrics" $metrics -}}
+{{- if .Values.tracing.enabled -}}
+{{- $obs := $cfg.observability | default dict -}}
+{{- $otel := mustMergeOverwrite (dict) ($obs.otel | default dict) (dict "enabled" true) -}}
+{{- $_ := set $obs "otel" $otel -}}
+{{- $_ := set $cfg "observability" $obs -}}
+{{- end -}}
 {{- if not (hasKey $cfg "pricing_file") -}}
 {{- $_ := set $cfg "pricing_file" (ternary "/etc/switchyard/pricing.json" "/app/config/pricing.json" (not (empty .Values.pricing))) -}}
 {{- end -}}
@@ -114,6 +120,34 @@ env:
   {{- range $k, $v := .Values.env }}
   - name: {{ $k }}
     value: {{ $v | toString | quote }}
+  {{- end }}
+  {{- with .Values.tracing }}
+  {{- if .enabled }}
+  - name: K8S_NAMESPACE
+    valueFrom:
+      fieldRef: { fieldPath: metadata.namespace }
+  - name: K8S_POD_NAME
+    valueFrom:
+      fieldRef: { fieldPath: metadata.name }
+  {{- $attrs := list "k8s.namespace.name=$(K8S_NAMESPACE)" "k8s.pod.name=$(K8S_POD_NAME)" }}
+  {{- range $k, $v := .resourceAttributes }}
+  {{- $attrs = append $attrs (printf "%s=%s" $k $v) }}
+  {{- end }}
+  - name: OTEL_RESOURCE_ATTRIBUTES
+    value: {{ join "," $attrs | quote }}
+  - name: OTEL_TRACES_SAMPLER
+    value: parentbased_traceidratio
+  - name: OTEL_TRACES_SAMPLER_ARG
+    value: {{ .sampleRatio | toString | quote }}
+  {{- with .endpoint }}
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: {{ . | quote }}
+  {{- end }}
+  {{- with .serviceName }}
+  - name: OTEL_SERVICE_NAME
+    value: {{ . | quote }}
+  {{- end }}
+  {{- end }}
   {{- end }}
 {{- end }}
 

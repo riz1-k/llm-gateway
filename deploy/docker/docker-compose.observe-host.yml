@@ -1,14 +1,18 @@
 # Switchyard — observability for a gateway running on this host (not in compose): Prometheus scrapes
-# the host gateway's /metrics, Grafana shows the provisioned dashboards with a Postgres datasource on
-# the host's `llmgateway` database. Reuses observability/grafana/{provisioning,dashboards} and the
+# the host gateway's /metrics, Tempo receives traces over OTLP/HTTP, Grafana shows the provisioned
+# dashboards with a Postgres datasource on the host's `llmgateway` database and a Tempo datasource.
+# Reuses observability/grafana/{provisioning,dashboards}, observability/tempo/tempo.yaml and the
 # alert rules of the full stack.
 #
 #   make observe-host-up      # Prometheus http://127.0.0.1:9092 · Grafana http://127.0.0.1:3302
+#                             # Tempo API http://127.0.0.1:3200 · OTLP/HTTP http://127.0.0.1:4318
 #   make observe-host-down    # stop and delete volumes
 #
-# Linux only: both containers use host networking so they can reach services bound to 127.0.0.1
+# Linux only: the containers use host networking so they can reach services bound to 127.0.0.1
 # (the gateway on :8787, Postgres on :5432). They listen on 127.0.0.1 only, on ports that do not
-# clash with the full compose stack (9091/3301) or the gateway.
+# clash with the full compose stack (9091/3301/3201/4319) or the gateway. OTLP/HTTP is on the
+# standard 4318, so host services (the gateway, DocsQA, OpsAgent) export there with the SDK
+# default endpoint.
 # The Postgres credentials default to the local dev placeholders used by config/gateway.local.yaml;
 # point GRAFANA_PG_USER/GRAFANA_PG_PASSWORD at a read-only role anywhere else (see
 # deploy/docker/postgres/10-grafana-reader.sh for the grants the full stack uses).
@@ -39,6 +43,31 @@ services:
     cpus: 0.5
     restart: 'no'
 
+  tempo:
+    image: grafana/tempo:3.1.1@sha256:64e2fbd56d9c2b3412a4b430a58ea59e91a670b1e75f920a0c702213ad145044
+    network_mode: host
+    command: [-config.file=/etc/tempo/tempo.yaml, -config.expand-env=true]
+    environment:
+      TEMPO_LISTEN_ADDR: 127.0.0.1
+      TEMPO_HTTP_PORT: ${OBSERVE_TEMPO_PORT:-3200}
+      TEMPO_GRPC_PORT: ${OBSERVE_TEMPO_GRPC_PORT:-9096}
+      TEMPO_OTLP_PORT: ${OBSERVE_OTLP_PORT:-4318}
+    volumes:
+      - ../../observability/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempodata:/var/tempo
+    healthcheck:
+      test: [CMD, /tempo, -health, '-health.url=http://127.0.0.1:${OBSERVE_TEMPO_PORT:-3200}/ready']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    mem_limit: 256m
+    cpus: 0.5
+    restart: 'no'
+
   grafana:
     image: grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
     network_mode: host
@@ -55,6 +84,7 @@ services:
       GF_NEWS_NEWS_FEED_ENABLED: 'false'
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/switchyard/switchyard-overview.json
       PROMETHEUS_URL: http://127.0.0.1:${OBSERVE_PROMETHEUS_PORT:-9092}
+      TEMPO_URL: http://127.0.0.1:${OBSERVE_TEMPO_PORT:-3200}
       GRAFANA_PG_HOST: ${GRAFANA_PG_HOST:-127.0.0.1:5432}
       GRAFANA_PG_USER: ${GRAFANA_PG_USER:-dev}
       GRAFANA_PG_PASSWORD: ${GRAFANA_PG_PASSWORD:-dev}
@@ -64,6 +94,7 @@ services:
       - grafanadata:/var/lib/grafana
     depends_on:
       prometheus: { condition: service_healthy }
+      tempo: { condition: service_healthy }
     healthcheck:
       test: [CMD, wget, -q, --spider, 'http://127.0.0.1:${OBSERVE_GRAFANA_PORT:-3302}/api/health']
       interval: 5s
@@ -77,4 +108,5 @@ services:
 
 volumes:
   promdata:
+  tempodata:
   grafanadata:

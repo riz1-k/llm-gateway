@@ -49,7 +49,12 @@ export interface RecordedRequest {
   path: string;
   at: number;
   body: unknown;
+  /** W3C trace-context headers the request carried (`traceparent`, `tracestate`, `baggage`). */
+  trace?: Record<string, string>;
 }
+
+/** Only trace-context headers are recorded: never credentials. */
+const TRACE_HEADERS = ['traceparent', 'tracestate', 'baggage'] as const;
 
 export interface MockStats {
   total: number;
@@ -117,11 +122,17 @@ export function createMockApp(opts: MockServerOptions = {}): MockApp {
   const embeddingDim = opts.embeddingDim ?? 256;
 
   let stats: MockStats = { total: 0, requests: {}, recent: [] };
-  const record = (method: string, path: string, body: unknown): void => {
+  const record = (c: Context, body: unknown): void => {
+    const { method, path } = c.req;
     stats.total++;
     const key = `${method} ${path}`;
     stats.requests[key] = (stats.requests[key] ?? 0) + 1;
-    stats.recent.push({ method, path, at: Date.now(), body });
+    const entry: RecordedRequest = { method, path, at: Date.now(), body };
+    for (const h of TRACE_HEADERS) {
+      const v = c.req.header(h);
+      if (v) (entry.trace ??= {})[h] = v;
+    }
+    stats.recent.push(entry);
     if (stats.recent.length > MAX_RECENT) stats.recent.shift();
   };
 
@@ -143,10 +154,10 @@ export function createMockApp(opts: MockServerOptions = {}): MockApp {
     try {
       body = await c.req.json();
     } catch {
-      record(c.req.method, c.req.path, null);
+      record(c, null);
       throw new BadRequest('request body must be valid JSON');
     }
-    record(c.req.method, c.req.path, body);
+    record(c, body);
     if (!isRecord(body)) throw new BadRequest('request body must be a JSON object');
     const model = typeof body.model === 'string' ? body.model : '';
     const fault = mergeFaults(baseFault, faultsFromHeaders(c.req.raw.headers, [model]));

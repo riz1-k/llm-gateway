@@ -1,7 +1,8 @@
 # Grafana datasources, shared by the docker compose stack (docker-compose.yml) and the host-mode
 # stack (docker-compose.observe-host.yml). UIDs are referenced by the dashboards' default datasource
-# variables; URLs and credentials come from the container environment (PROMETHEUS_URL,
+# variables; URLs and credentials come from the container environment (PROMETHEUS_URL, TEMPO_URL,
 # GRAFANA_PG_HOST, GRAFANA_PG_USER, GRAFANA_PG_PASSWORD), which each compose file sets.
+# `$$` escapes a literal `$` (Grafana expands environment variables in this file).
 apiVersion: 1
 
 datasources:
@@ -33,3 +34,33 @@ datasources:
       connMaxLifetime: 14400
     secureJsonData:
       password: ${GRAFANA_PG_PASSWORD}
+
+  # Traces of the gateway (and of any service exporting to the same Tempo). Trace-to-metrics links
+  # open the route's request rate and p95 latency in Prometheus, keyed by the span's `sy.route`.
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: ${TEMPO_URL}
+    editable: false
+    jsonData:
+      nodeGraph:
+        enabled: true
+      search:
+        hide: false
+      traceQuery:
+        timeShiftEnabled: true
+        spanStartTimeShift: -1h
+        spanEndTimeShift: 1h
+      tracesToMetrics:
+        datasourceUid: prometheus
+        spanStartTimeShift: -5m
+        spanEndTimeShift: 5m
+        tags:
+          - key: sy.route
+            value: route
+        queries:
+          - name: Route requests/s
+            query: sum by (status) (rate(sy_requests_total{$$__tags}[1m]))
+          - name: Route p95 latency
+            query: histogram_quantile(0.95, sum by (le) (rate(sy_request_duration_seconds_bucket{$$__tags}[5m])))

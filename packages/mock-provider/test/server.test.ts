@@ -246,6 +246,19 @@ describe('mock server: OpenAI endpoints', () => {
     await fetch(`${server.url}/__mock/reset`, { method: 'POST' });
     expect(server.stats().total).toBe(0);
   });
+
+  it('records trace-context headers, and only those', async () => {
+    const traceparent = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01';
+    await post(
+      '/v1/chat/completions',
+      { model: 'mock-echo', messages: [{ role: 'user', content: 'hi' }] },
+      { traceparent, baggage: 'k=v', authorization: 'Bearer secret' },
+    );
+    await post('/v1/embeddings', { model: 'm', input: 'x' });
+    const [traced, plain] = server.stats().recent;
+    expect(traced!.trace).toEqual({ traceparent, baggage: 'k=v' });
+    expect(plain!.trace).toBeUndefined();
+  });
 });
 
 describe('mock server: Anthropic endpoint', () => {
