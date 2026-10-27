@@ -60,6 +60,12 @@ npx switchyard-gateway init && npx switchyard-gateway serve   # offline demo, no
 
 ## Quickstart
 
+> **First release pending.** `switchyard-gateway` is not on npm yet: the release workflow is ready and waits for
+> the one-time npm setup in [docs/RELEASING.md](docs/RELEASING.md). Until then, run it from source
+> (`git clone https://github.com/riz1-k/llm-gateway && cd llm-gateway && pnpm install && pnpm build`, then
+> `node packages/gateway/dist/cli.js` wherever this page says `npx switchyard-gateway`), or use the container
+> image `ghcr.io/riz1-k/switchyard:edge`, built from `main`.
+
 ### npx
 
 ```bash
@@ -92,8 +98,10 @@ Install it globally with `npm i -g switchyard-gateway` to get the `switchyard` c
 
 ```bash
 docker run --rm -p 8787:8787 -e OPENAI_API_KEY \
-  -v "$PWD/gateway.yaml:/etc/switchyard/gateway.yaml:ro" ghcr.io/riz1-k/switchyard:0.1.0
+  -v "$PWD/gateway.yaml:/etc/switchyard/gateway.yaml:ro" ghcr.io/riz1-k/switchyard:edge
 ```
+
+`:edge` tracks `main`; versioned tags (`:0.1.0`, `:0.1`, `:latest`) are published by the release workflow.
 
 The full local stack (gateway, worker, Redis, Postgres, Prometheus, Grafana and the mock) starts
 with `make compose-up && make compose-demo`. Grafana is then on `:3301`.
@@ -102,7 +110,8 @@ with `make compose-up && make compose-demo`. Grafana is then on `:3301`.
 
 ```bash
 git clone https://github.com/riz1-k/llm-gateway && cd llm-gateway
-helm install switchyard deploy/helm/switchyard -n switchyard --create-namespace -f my-values.yaml
+helm install switchyard deploy/helm/switchyard -n switchyard --create-namespace -f my-values.yaml \
+  --set image.tag=edge   # until the first release publishes the appVersion tag (0.1.0)
 ```
 
 `my-values.yaml` holds your `gateway.yaml` under `config:` and points to your Redis 8 and
@@ -265,6 +274,13 @@ runbooks are included ([docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)).
 | -------------------------------------------------------------- | ------------------------------------------------------ | ---------------------------------------------------------------- |
 | ![Overview](observability/screenshots/switchyard-overview.png) | ![Cost](observability/screenshots/switchyard-cost.png) | ![Providers](observability/screenshots/switchyard-providers.png) |
 
+These come from the compose demo. The same dashboards from the dev gateway, with per-team cost of
+real DocsQA, OpsAgent and eval traffic (2026-10-27):
+[Cost & budgets](observability/screenshots/dev-switchyard-cost.png) ·
+[Overview](observability/screenshots/dev-switchyard-overview.png) ·
+[Providers](observability/screenshots/dev-switchyard-providers.png)
+([how to read them](docs/OBSERVABILITY.md#from-the-dev-gateway-real-traffic-2026-10-27)).
+
 ## Deployment
 
 | Target         | How                                                                                                                                  |
@@ -303,6 +319,35 @@ streaming row's off/on inversion is noise, and RESULTS.md has the profile, an A/
 and the caveats.
 
 <!-- BENCH:END -->
+
+## Dogfooding
+
+The two other projects of the portfolio, [DocsQA](https://github.com/riz1-k/docsqa) and
+[OpsAgent](https://github.com/riz1-k/opsagent), send every model call through a Switchyard
+instance on the development machine, and so do their eval runners (team `evals`). Its usage
+ledger, from the first recorded request to the last, 2026-10-27 11:02–21:22 IST
+(`GET /admin/usage?group_by=team&from=2026-10-01&to=2026-10-27`; fallbacks from `usage_events`):
+
+| Team                          |  Requests | Tokens (prompt / completion) |  Cost (USD) | Cache hits        | Fallbacks |
+| ----------------------------- | --------: | ---------------------------: | ----------: | ----------------- | --------: |
+| `evals`                       |     1,225 |             921,313 / 53,198 |     $1.0209 | 680 (55.5%)       |         0 |
+| `docsqa`                      |     1,108 |             843,452 / 14,694 |     $0.4864 | 704 (63.5%)       |         0 |
+| `opsagent`                    |       294 |           1,395,851 / 55,452 |     $0.7465 | 2 (0.7%)          |         0 |
+| scratch teams (failure tests) |        31 |                   2,976 / 75 |     $0.0015 | 3                 |         0 |
+| **Total**                     | **2,658** |      **3,163,592 / 123,419** | **$2.2552** | **1,389 (52.3%)** |     **0** |
+
+- **Cost is shadow cost.** Copilot (via opencode) is flat-rate; its 333 requests are priced at
+  list-price equivalents: $1.4682 spent, plus $0.1989 saved by exact-cache hits. The rest is
+  the deterministic mock model used for quota-free runs, which carries a demo price ($0.7871).
+  The local llama.cpp embeddings and rerank and OpsAgent's scripted model are free.
+- **Caching pays off where requests repeat:** 1,342 of 1,531 embedding requests were cache hits
+  (repeated questions and eval reruns), and re-running evals replays Copilot answers from the exact
+  cache. Agent turns rarely repeat, hence OpsAgent's 0.7%.
+- **No request fell back** to a second target. Of the 21 errors, 19 are the 402/429
+  failure-mode tests on scratch teams; the other two are a client disconnect (499) and a 502 from
+  OpsAgent's scripted model while it was not running (the route's smoke test).
+
+The queries and raw outputs are in [docs/STATUS.md](docs/STATUS.md#cross-project-o).
 
 ## How it compares
 
@@ -360,6 +405,50 @@ Known gaps are tracked in [docs/STATUS.md](docs/STATUS.md#known-gaps).
 Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev setup
 (`pnpm install && pnpm test`, with Redis and Postgres for the platform tests), changesets and
 conventions. Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+
+## Part of a three-project portfolio
+
+Switchyard, DocsQA and OpsAgent are built to work together: both applications send every model call through the
+gateway, which puts every provider behind one metered, budgeted, observable API. In this setup that is GitHub
+Copilot through a local opencode bridge plus local llama.cpp models; OpenAI and Anthropic are drop-in alternatives.
+
+```mermaid
+flowchart LR
+  DQ["DocsQA<br/>permission-aware RAG"] -- "team docsqa" --> SY
+  OA["OpsAgent<br/>LangGraph agent + MCP, approved refunds"] -- "team opsagent" --> SY
+  EV["Eval runners<br/>(both apps)"] -- "team evals" --> SY
+  SY["Switchyard<br/>LLM gateway: routes, fallbacks, cache,<br/>rate limits, budgets, per-team cost"]
+  SY --> CP["GitHub Copilot via opencode<br/>(Claude Sonnet / Haiku, GPT)"]
+  SY --> LC["llama.cpp<br/>embeddings + rerank"]
+  SY --> OAI["OpenAI"]
+  SY --> ANT["Anthropic"]
+  SY -- "/metrics" --> PR["Prometheus"] --> GF["Grafana<br/>Overview · Cost & Budgets · Providers"]
+  SY -- "usage ledger (Postgres)" --> GF
+  OA -. "traces" .-> LF["Langfuse"]
+```
+
+- **[Switchyard](https://github.com/riz1-k/llm-gateway)**: the TypeScript LLM gateway. One OpenAI-compatible API
+  with routing and fallbacks, exact and semantic caching, rate limits, budgets and per-team cost.
+- **[DocsQA](https://github.com/riz1-k/docsqa)**: permission-aware RAG over technical docs (Postgres row-level
+  security, hybrid retrieval, verified citations, an eval suite with gates).
+- **[OpsAgent](https://github.com/riz1-k/opsagent)**: a LangGraph operations agent with an MCP server, where every
+  refund needs a human approval and a signed, single-use token.
+
+How they connect:
+
+- **Teams, keys, budgets.** Each app has a virtual key bound to its team (`docsqa`, `opsagent`; eval runs use
+  `evals`), each team a monthly hard budget ($50 / $50 / $100). `llm-gateway/scripts/seed-portfolio.sh` creates
+  them through the admin API and writes the DB-backed keys into each app's gitignored `.env`.
+- **Route names only.** The apps ask for virtual models (`docsqa-chat`, `docsqa-embed`, `opsagent-chat`, …); which
+  provider serves them, and the fallback order, is gateway config.
+- **Attribution.** Requests carry `x-sy-user` (the end user or operator) and `x-sy-tags`
+  (`app:docsqa,feature:answer`, `app:opsagent,node:agent`, `eval,case:q017`), stored with every usage event.
+- **Per-team cost.** The gateway prices every call (Copilot at shadow list prices, since it is flat-rate), returns it
+  in `usage.cost` (also on streams, which the apps show per answer and per agent run) and exports it per team to
+  Prometheus and Grafana
+  ([Cost & Budgets from the dev gateway](https://github.com/riz1-k/llm-gateway/blob/main/observability/screenshots/dev-switchyard-cost.png),
+  real traffic, 2026-10-27). A spent budget or a rate limit reaches the apps as 402 / 429, which they turn into clear
+  messages.
 
 ## License
 
