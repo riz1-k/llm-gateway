@@ -138,6 +138,8 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if [ -n "$NPM_TOKEN" ]; then
+            # literal on purpose: npm expands ${NPM_TOKEN} from the environment when it reads .npmrc
+            # shellcheck disable=SC2016
             echo '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' >> "$HOME/.npmrc"
             echo "auth: NPM_TOKEN"
           else
