@@ -11,7 +11,7 @@
 
 # ── base: Node + the pnpm version pinned in package.json#packageManager (via corepack) ──────────
 # The tag is written out (no ARG) so Dependabot can bump the tag and digest together.
-FROM node:24.22.1-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS base
+FROM node:26.11.1-trixie-slim@sha256:193fe51b64e77981119c98c2002c9e32a70e2f006fb4d25068ce0558998917f0 AS base
 ENV CI=true \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
     PNPM_STORE=/pnpm/store
