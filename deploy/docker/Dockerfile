@@ -51,7 +51,7 @@ RUN pnpm --filter switchyard-gateway deploy --prod --offline --store-dir "$PNPM_
       if (new Tiktoken(r).encode('hello world').length !== 2) process.exit(1)"
 
 # ── runtime: distroless Node 24 (no shell, no package manager), non-root ──────────────────────
-FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:cb606325b7ec4af55462cb0b424a53b452a5b4a894ffe841fcf1048d216fb9f8 AS runtime
+FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:b8cec4b2f2126ff7bd034ec9ac207ffb3272667dfdc48376e3b035d3270549ba AS runtime
 ARG VERSION=0.1.0
 ARG REVISION=unknown
 ARG CREATED=1970-01-01T00:00:00Z
