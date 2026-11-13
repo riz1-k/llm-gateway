@@ -84,7 +84,7 @@
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
     "drizzle-orm": "0.45.4",
-    "hono": "4.13.14",
+    "hono": "4.13.16",
     "ioredis": "6.0.0",
     "js-tiktoken": "1.0.21",
     "nanoid": "6.0.2",
